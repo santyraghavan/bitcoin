@@ -58,17 +58,6 @@ static constexpr int DUMP_PEERS_INTERVAL = 15 * 60;
 #define MSG_DONTWAIT 0
 #endif
 
-// Fix for ancient MinGW versions, that don't have defined these in ws2tcpip.h.
-// Todo: Can be removed when our pull-tester is upgraded to a modern MinGW version.
-#ifdef WIN32
-#ifndef PROTECTION_LEVEL_UNRESTRICTED
-#define PROTECTION_LEVEL_UNRESTRICTED 10
-#endif
-#ifndef IPV6_PROTECTION_LEVEL
-#define IPV6_PROTECTION_LEVEL 23
-#endif
-#endif
-
 /** Used to pass flags to the Bind() function */
 enum BindFlags {
     BF_NONE         = 0,
@@ -95,8 +84,6 @@ CCriticalSection cs_mapLocalHost;
 std::map<CNetAddr, LocalServiceInfo> mapLocalHost GUARDED_BY(cs_mapLocalHost);
 static bool vfLimited[NET_MAX] GUARDED_BY(cs_mapLocalHost) = {};
 std::string strSubVersion;
-
-limitedmap<uint256, int64_t> mapAlreadyAskedFor(MAX_INV_SZ);
 
 void CConnman::AddOneShot(const std::string& strDest)
 {
@@ -174,8 +161,7 @@ CAddress GetLocalAddress(const CNetAddr *paddrPeer, ServiceFlags nLocalServices)
 static int GetnScore(const CService& addr)
 {
     LOCK(cs_mapLocalHost);
-    if (mapLocalHost.count(addr) == LOCAL_NONE)
-        return 0;
+    if (mapLocalHost.count(addr) == 0) return 0;
     return mapLocalHost[addr].nScore;
 }
 
@@ -764,6 +750,7 @@ struct NodeEvictionCandidate
     bool fBloomFilter;
     CAddress addr;
     uint64_t nKeyedNetGroup;
+    bool prefer_evict;
 };
 
 static bool ReverseCompareNodeMinPingTime(const NodeEvictionCandidate &a, const NodeEvictionCandidate &b)
@@ -832,7 +819,8 @@ bool CConnman::AttemptToEvictConnection()
             NodeEvictionCandidate candidate = {node->GetId(), node->nTimeConnected, node->nMinPingUsecTime,
                                                node->nLastBlockTime, node->nLastTXTime,
                                                HasAllDesirableServiceFlags(node->nServices),
-                                               node->fRelayTxes, node->pfilter != nullptr, node->addr, node->nKeyedNetGroup};
+                                               node->fRelayTxes, node->pfilter != nullptr, node->addr, node->nKeyedNetGroup,
+                                               node->m_prefer_evict};
             vEvictionCandidates.push_back(candidate);
         }
     }
@@ -856,6 +844,14 @@ bool CConnman::AttemptToEvictConnection()
     EraseLastKElements(vEvictionCandidates, ReverseCompareNodeTimeConnected, vEvictionCandidates.size() / 2);
 
     if (vEvictionCandidates.empty()) return false;
+
+    // If any remaining peers are preferred for eviction consider only them.
+    // This happens after the other preferences since if a peer is really the best by other criteria (esp relaying blocks)
+    //  then we probably don't want to evict it no matter what.
+    if (std::any_of(vEvictionCandidates.begin(),vEvictionCandidates.end(),[](NodeEvictionCandidate const &n){return n.prefer_evict;})) {
+        vEvictionCandidates.erase(std::remove_if(vEvictionCandidates.begin(),vEvictionCandidates.end(),
+                                  [](NodeEvictionCandidate const &n){return !n.prefer_evict;}),vEvictionCandidates.end());
+    }
 
     // Identify the network group with the most connections and youngest member.
     // (vEvictionCandidates is already sorted by reverse connect time)
@@ -937,7 +933,11 @@ void CConnman::AcceptConnection(const ListenSocket& hListenSocket) {
     // on all platforms.  Set it again here just to be sure.
     SetSocketNoDelay(hSocket);
 
-    if (m_banman && m_banman->IsBanned(addr) && !whitelisted)
+    int bannedlevel = m_banman ? m_banman->IsBannedLevel(addr) : 0;
+
+    // Don't accept connections from banned peers, but if our inbound slots aren't almost full, accept
+    // if the only banning reason was an automatic misbehavior ban.
+    if (!whitelisted && bannedlevel > ((nInbound + 1 < nMaxInbound) ? 1 : 0))
     {
         LogPrint(BCLog::NET, "connection from %s dropped (banned)\n", addr.ToString());
         CloseSocket(hSocket);
@@ -961,6 +961,7 @@ void CConnman::AcceptConnection(const ListenSocket& hListenSocket) {
     CNode* pnode = new CNode(id, nLocalServices, GetBestHeight(), hSocket, addr, CalculateKeyedNetGroup(addr), nonce, addr_bind, "", true);
     pnode->AddRef();
     pnode->fWhitelisted = whitelisted;
+    pnode->m_prefer_evict = bannedlevel > 0;
     m_msgproc->InitializeNode(pnode);
 
     LogPrint(BCLog::NET, "connection from %s accepted\n", addr.ToString());
@@ -1764,9 +1765,15 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect)
                 addr = addrman.Select(fFeeler);
             }
 
-            // if we selected an invalid address, restart
-            if (!addr.IsValid() || setConnected.count(addr.GetGroup()) || IsLocal(addr))
+            // Require outbound connections, other than feelers, to be to distinct network groups
+            if (!fFeeler && setConnected.count(addr.GetGroup())) {
                 break;
+            }
+
+            // if we selected an invalid or local address, restart
+            if (!addr.IsValid() || IsLocal(addr)) {
+                break;
+            }
 
             // If we didn't find an appropriate destination after trying 100 addresses fetched from addrman,
             // stop this loop, and let the outer loop run again (which sleeps, adds seed nodes, recalculates
@@ -2639,40 +2646,6 @@ CNode::CNode(NodeId idIn, ServiceFlags nLocalServicesIn, int nMyStartingHeightIn
 CNode::~CNode()
 {
     CloseSocket(hSocket);
-}
-
-void CNode::AskFor(const CInv& inv)
-{
-    if (mapAskFor.size() > MAPASKFOR_MAX_SZ || setAskFor.size() > SETASKFOR_MAX_SZ)
-        return;
-    // a peer may not have multiple non-responded queue positions for a single inv item
-    if (!setAskFor.insert(inv.hash).second)
-        return;
-
-    // We're using mapAskFor as a priority queue,
-    // the key is the earliest time the request can be sent
-    int64_t nRequestTime;
-    limitedmap<uint256, int64_t>::const_iterator it = mapAlreadyAskedFor.find(inv.hash);
-    if (it != mapAlreadyAskedFor.end())
-        nRequestTime = it->second;
-    else
-        nRequestTime = 0;
-    LogPrint(BCLog::NET, "askfor %s  %d (%s) peer=%d\n", inv.ToString(), nRequestTime, FormatISO8601Time(nRequestTime/1000000), id);
-
-    // Make sure not to reuse time indexes to keep things in the same order
-    int64_t nNow = GetTimeMicros() - 1000000;
-    static int64_t nLastTime;
-    ++nLastTime;
-    nNow = std::max(nNow, nLastTime);
-    nLastTime = nNow;
-
-    // Each retry is 2 minutes after the last
-    nRequestTime = std::max(nRequestTime + 2 * 60 * 1000000, nNow);
-    if (it != mapAlreadyAskedFor.end())
-        mapAlreadyAskedFor.update(it, nRequestTime);
-    else
-        mapAlreadyAskedFor.insert(std::make_pair(inv.hash, nRequestTime));
-    mapAskFor.insert(std::make_pair(nRequestTime, inv));
 }
 
 bool CConnman::NodeFullyConnected(const CNode* pnode)
