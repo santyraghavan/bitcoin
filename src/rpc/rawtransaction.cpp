@@ -40,6 +40,11 @@
 
 #include <univalue.h>
 
+/** High fee for sendrawtransaction and testmempoolaccept.
+ * By default, transaction with a fee higher than this will be rejected by the
+ * RPCs. This can be overriden with the maxfeerate argument.
+ */
+constexpr static CAmount DEFAULT_MAX_RAW_TX_FEE{COIN / 10};
 
 static void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry)
 {
@@ -610,33 +615,54 @@ static UniValue decoderawtransaction(const JSONRPCRequest& request)
     return result;
 }
 
+static std::string GetAllOutputTypes()
+{
+    std::string ret;
+    for (int i = TX_NONSTANDARD; i <= TX_WITNESS_UNKNOWN; ++i) {
+        if (i != TX_NONSTANDARD) ret += ", ";
+        ret += GetTxnOutputType(static_cast<txnouttype>(i));
+    }
+    return ret;
+}
+
 static UniValue decodescript(const JSONRPCRequest& request)
 {
-    if (request.fHelp || request.params.size() != 1)
-        throw std::runtime_error(
-            RPCHelpMan{"decodescript",
+    const RPCHelpMan help{"decodescript",
                 "\nDecode a hex-encoded script.\n",
                 {
                     {"hexstring", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the hex-encoded script"},
                 },
                 RPCResult{
             "{\n"
-            "  \"asm\":\"asm\",   (string) Script public key\n"
-            "  \"hex\":\"hex\",   (string) hex-encoded public key\n"
-            "  \"type\":\"type\", (string) The output type\n"
-            "  \"reqSigs\": n,    (numeric) The required signatures\n"
-            "  \"addresses\": [   (json array of string)\n"
-            "     \"address\"     (string) bitcoin address\n"
+            "  \"asm\":\"asm\",          (string) Script public key\n"
+            "  \"type\":\"type\",        (string) The output type (e.g. "+GetAllOutputTypes()+")\n"
+            "  \"reqSigs\": n,         (numeric) The required signatures\n"
+            "  \"addresses\": [        (json array of string)\n"
+            "     \"address\"          (string) bitcoin address\n"
             "     ,...\n"
             "  ],\n"
-            "  \"p2sh\",\"address\" (string) address of P2SH script wrapping this redeem script (not returned if the script is already a P2SH).\n"
+            "  \"p2sh\":\"str\"          (string) address of P2SH script wrapping this redeem script (not returned if the script is already a P2SH).\n"
+            "  \"segwit\": {           (json object) Result of a witness script public key wrapping this redeem script (not returned if the script is a P2SH or witness).\n"
+            "    \"asm\":\"str\",        (string) String representation of the script public key\n"
+            "    \"hex\":\"hexstr\",     (string) Hex string of the script public key\n"
+            "    \"type\":\"str\",       (string) The type of the script public key (e.g. witness_v0_keyhash or witness_v0_scripthash)\n"
+            "    \"reqSigs\": n,       (numeric) The required signatures (always 1)\n"
+            "    \"addresses\": [      (json array of string) (always length 1)\n"
+            "      \"address\"         (string) segwit address\n"
+            "       ,...\n"
+            "    ],\n"
+            "    \"p2sh-segwit\":\"str\" (string) address of the P2SH script wrapping this witness redeem script.\n"
             "}\n"
                 },
                 RPCExamples{
                     HelpExampleCli("decodescript", "\"hexstring\"")
             + HelpExampleRpc("decodescript", "\"hexstring\"")
                 },
-            }.ToString());
+    };
+
+    if (request.fHelp || !help.IsValidNumArgs(request.params.size())) {
+        throw std::runtime_error(help.ToString());
+    }
 
     RPCTypeCheck(request.params, {UniValue::VSTR});
 
@@ -648,7 +674,7 @@ static UniValue decodescript(const JSONRPCRequest& request)
     } else {
         // Empty scripts are valid
     }
-    ScriptPubKeyToUniv(script, r, false);
+    ScriptPubKeyToUniv(script, r, /* fIncludeHex */ false);
 
     UniValue type;
     type = find_value(r, "type");
@@ -682,7 +708,7 @@ static UniValue decodescript(const JSONRPCRequest& request)
                 // Newer segwit program versions should be considered when then become available.
                 segwitScr = GetScriptForDestination(WitnessV0ScriptHash(script));
             }
-            ScriptPubKeyToUniv(segwitScr, sr, true);
+            ScriptPubKeyToUniv(segwitScr, sr, /* fIncludeHex */ true);
             sr.pushKV("p2sh-segwit", EncodeDestination(CScriptID(segwitScr)));
             r.pushKV("segwit", sr);
         }
@@ -964,7 +990,7 @@ static UniValue signrawtransactionwithkey(const JSONRPCRequest& request)
                                     {"scriptPubKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "script key"},
                                     {"redeemScript", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "(required for P2SH) redeem script"},
                                     {"witnessScript", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "(required for P2WSH or P2SH-P2WSH) witness script"},
-                                    {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "The amount spent"},
+                                    {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "(required for Segwit inputs) the amount spent"},
                                 },
                                 },
                         },
@@ -1023,14 +1049,14 @@ static UniValue signrawtransactionwithkey(const JSONRPCRequest& request)
 
 static UniValue sendrawtransaction(const JSONRPCRequest& request)
 {
-    if (request.fHelp || request.params.size() < 1 || request.params.size() > 2)
-        throw std::runtime_error(
-            RPCHelpMan{"sendrawtransaction",
+    const RPCHelpMan help{"sendrawtransaction",
                 "\nSubmits raw transaction (serialized, hex-encoded) to local node and network.\n"
                 "\nAlso see createrawtransaction and signrawtransactionwithkey calls.\n",
                 {
                     {"hexstring", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The hex string of the raw transaction"},
-                    {"maxfeerate", RPCArg::Type::AMOUNT, /* default */ FormatMoney(maxTxFee), "Reject transactions whose fee rate is higher than the specified value, expressed in " + CURRENCY_UNIT + "/kB\n"},
+                    {"maxfeerate", RPCArg::Type::AMOUNT, /* default */ FormatMoney(DEFAULT_MAX_RAW_TX_FEE),
+                        "Reject transactions whose fee rate is higher than the specified value, expressed in " + CURRENCY_UNIT +
+                            "/kB.\nSet to 0 to accept any fee rate.\n"},
                 },
                 RPCResult{
             "\"hex\"             (string) The transaction hash in hex\n"
@@ -1045,7 +1071,11 @@ static UniValue sendrawtransaction(const JSONRPCRequest& request)
             "\nAs a JSON-RPC call\n"
             + HelpExampleRpc("sendrawtransaction", "\"signedhex\"")
                 },
-            }.ToString());
+    };
+
+    if (request.fHelp || !help.IsValidNumArgs(request.params.size())) {
+        throw std::runtime_error(help.ToString());
+    }
 
     RPCTypeCheck(request.params, {
         UniValue::VSTR,
@@ -1058,7 +1088,7 @@ static UniValue sendrawtransaction(const JSONRPCRequest& request)
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
     CTransactionRef tx(MakeTransactionRef(std::move(mtx)));
 
-    CAmount max_raw_tx_fee = maxTxFee;
+    CAmount max_raw_tx_fee = DEFAULT_MAX_RAW_TX_FEE;
     // TODO: temporary migration code for old clients. Remove in v0.20
     if (request.params[1].isBool()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Second argument must be numeric (maxfeerate) and no longer supports a boolean. To allow a transaction with high fees, set maxfeerate to 0.");
@@ -1085,9 +1115,7 @@ static UniValue sendrawtransaction(const JSONRPCRequest& request)
 
 static UniValue testmempoolaccept(const JSONRPCRequest& request)
 {
-    if (request.fHelp || request.params.size() < 1 || request.params.size() > 2) {
-        throw std::runtime_error(
-            RPCHelpMan{"testmempoolaccept",
+    const RPCHelpMan help{"testmempoolaccept",
                 "\nReturns result of mempool acceptance tests indicating if raw transaction (serialized, hex-encoded) would be accepted by mempool.\n"
                 "\nThis checks if the transaction violates the consensus or policy rules.\n"
                 "\nSee sendrawtransaction call.\n",
@@ -1098,7 +1126,7 @@ static UniValue testmempoolaccept(const JSONRPCRequest& request)
                             {"rawtx", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, ""},
                         },
                         },
-                    {"maxfeerate", RPCArg::Type::AMOUNT, /* default */ FormatMoney(maxTxFee), "Reject transactions whose fee rate is higher than the specified value, expressed in " + CURRENCY_UNIT + "/kB\n"},
+                    {"maxfeerate", RPCArg::Type::AMOUNT, /* default */ FormatMoney(DEFAULT_MAX_RAW_TX_FEE), "Reject transactions whose fee rate is higher than the specified value, expressed in " + CURRENCY_UNIT + "/kB\n"},
                 },
                 RPCResult{
             "[                   (array) The result of the mempool acceptance test for each raw transaction in the input array.\n"
@@ -1120,7 +1148,10 @@ static UniValue testmempoolaccept(const JSONRPCRequest& request)
             "\nAs a JSON-RPC call\n"
             + HelpExampleRpc("testmempoolaccept", "[\"signedhex\"]")
                 },
-            }.ToString());
+    };
+
+    if (request.fHelp || !help.IsValidNumArgs(request.params.size())) {
+        throw std::runtime_error(help.ToString());
     }
 
     RPCTypeCheck(request.params, {
@@ -1139,7 +1170,7 @@ static UniValue testmempoolaccept(const JSONRPCRequest& request)
     CTransactionRef tx(MakeTransactionRef(std::move(mtx)));
     const uint256& tx_hash = tx->GetHash();
 
-    CAmount max_raw_tx_fee = maxTxFee;
+    CAmount max_raw_tx_fee = DEFAULT_MAX_RAW_TX_FEE;
     // TODO: temporary migration code for old clients. Remove in v0.20
     if (request.params[1].isBool()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Second argument must be numeric (maxfeerate) and no longer supports a boolean. To allow a transaction with high fees, set maxfeerate to 0.");
@@ -1520,7 +1551,6 @@ UniValue combinepsbt(const JSONRPCRequest& request)
         throw JSONRPCTransactionError(error);
     }
 
-    UniValue result(UniValue::VOBJ);
     CDataStream ssTx(SER_NETWORK, PROTOCOL_VERSION);
     ssTx << merged_psbt;
     return EncodeBase64((unsigned char*)ssTx.data(), ssTx.size());
@@ -1915,148 +1945,56 @@ UniValue analyzepsbt(const JSONRPCRequest& request)
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, strprintf("TX decode failed %s", error));
     }
 
-    // Go through each input and build status
+    PSBTAnalysis psbta = AnalyzePSBT(psbtx);
+
     UniValue result(UniValue::VOBJ);
     UniValue inputs_result(UniValue::VARR);
-    bool calc_fee = true;
-    bool all_final = true;
-    bool only_missing_sigs = true;
-    bool only_missing_final = false;
-    CAmount in_amt = 0;
-    for (unsigned int i = 0; i < psbtx.tx->vin.size(); ++i) {
-        PSBTInput& input = psbtx.inputs[i];
+    for (const auto& input : psbta.inputs) {
         UniValue input_univ(UniValue::VOBJ);
         UniValue missing(UniValue::VOBJ);
 
-        // Check for a UTXO
-        CTxOut utxo;
-        if (psbtx.GetInputUTXO(utxo, i)) {
-            in_amt += utxo.nValue;
-            input_univ.pushKV("has_utxo", true);
-        } else {
-            input_univ.pushKV("has_utxo", false);
-            input_univ.pushKV("is_final", false);
-            input_univ.pushKV("next", "updater");
-            calc_fee = false;
-        }
+        input_univ.pushKV("has_utxo", input.has_utxo);
+        input_univ.pushKV("is_final", input.is_final);
+        input_univ.pushKV("next", PSBTRoleName(input.next));
 
-        // Check if it is final
-        if (!utxo.IsNull() && !PSBTInputSigned(input)) {
-            input_univ.pushKV("is_final", false);
-            all_final = false;
-
-            // Figure out what is missing
-            SignatureData outdata;
-            bool complete = SignPSBTInput(DUMMY_SIGNING_PROVIDER, psbtx, i, 1, &outdata);
-
-            // Things are missing
-            if (!complete) {
-                if (!outdata.missing_pubkeys.empty()) {
-                    // Missing pubkeys
-                    UniValue missing_pubkeys_univ(UniValue::VARR);
-                    for (const CKeyID& pubkey : outdata.missing_pubkeys) {
-                        missing_pubkeys_univ.push_back(HexStr(pubkey));
-                    }
-                    missing.pushKV("pubkeys", missing_pubkeys_univ);
-                }
-                if (!outdata.missing_redeem_script.IsNull()) {
-                    // Missing redeemScript
-                    missing.pushKV("redeemscript", HexStr(outdata.missing_redeem_script));
-                }
-                if (!outdata.missing_witness_script.IsNull()) {
-                    // Missing witnessScript
-                    missing.pushKV("witnessscript", HexStr(outdata.missing_witness_script));
-                }
-                if (!outdata.missing_sigs.empty()) {
-                    // Missing sigs
-                    UniValue missing_sigs_univ(UniValue::VARR);
-                    for (const CKeyID& pubkey : outdata.missing_sigs) {
-                        missing_sigs_univ.push_back(HexStr(pubkey));
-                    }
-                    missing.pushKV("signatures", missing_sigs_univ);
-                }
-                input_univ.pushKV("missing", missing);
-
-                // If we are only missing signatures and nothing else, then next is signer
-                if (outdata.missing_pubkeys.empty() && outdata.missing_redeem_script.IsNull() && outdata.missing_witness_script.IsNull() && !outdata.missing_sigs.empty()) {
-                    input_univ.pushKV("next", "signer");
-                } else {
-                    only_missing_sigs = false;
-                    input_univ.pushKV("next", "updater");
-                }
-            } else {
-                only_missing_final = true;
-                input_univ.pushKV("next", "finalizer");
+        if (!input.missing_pubkeys.empty()) {
+            UniValue missing_pubkeys_univ(UniValue::VARR);
+            for (const CKeyID& pubkey : input.missing_pubkeys) {
+                missing_pubkeys_univ.push_back(HexStr(pubkey));
             }
-        } else if (!utxo.IsNull()){
-            input_univ.pushKV("is_final", true);
+            missing.pushKV("pubkeys", missing_pubkeys_univ);
+        }
+        if (!input.missing_redeem_script.IsNull()) {
+            missing.pushKV("redeemscript", HexStr(input.missing_redeem_script));
+        }
+        if (!input.missing_witness_script.IsNull()) {
+            missing.pushKV("witnessscript", HexStr(input.missing_witness_script));
+        }
+        if (!input.missing_sigs.empty()) {
+            UniValue missing_sigs_univ(UniValue::VARR);
+            for (const CKeyID& pubkey : input.missing_sigs) {
+                missing_sigs_univ.push_back(HexStr(pubkey));
+            }
+            missing.pushKV("signatures", missing_sigs_univ);
+        }
+        if (!missing.getKeys().empty()) {
+            input_univ.pushKV("missing", missing);
         }
         inputs_result.push_back(input_univ);
     }
     result.pushKV("inputs", inputs_result);
 
-    if (all_final) {
-        only_missing_sigs = false;
-        result.pushKV("next", "extractor");
+    if (psbta.estimated_vsize != nullopt) {
+        result.pushKV("estimated_vsize", (int)*psbta.estimated_vsize);
     }
-    if (calc_fee) {
-        // Get the output amount
-        CAmount out_amt = std::accumulate(psbtx.tx->vout.begin(), psbtx.tx->vout.end(), CAmount(0),
-            [](CAmount a, const CTxOut& b) {
-                return a += b.nValue;
-            }
-        );
-
-        // Get the fee
-        CAmount fee = in_amt - out_amt;
-
-        // Estimate the size
-        CMutableTransaction mtx(*psbtx.tx);
-        CCoinsView view_dummy;
-        CCoinsViewCache view(&view_dummy);
-        bool success = true;
-
-        for (unsigned int i = 0; i < psbtx.tx->vin.size(); ++i) {
-            PSBTInput& input = psbtx.inputs[i];
-            if (SignPSBTInput(DUMMY_SIGNING_PROVIDER, psbtx, i, 1, nullptr, true)) {
-                mtx.vin[i].scriptSig = input.final_script_sig;
-                mtx.vin[i].scriptWitness = input.final_script_witness;
-
-                Coin newcoin;
-                if (!psbtx.GetInputUTXO(newcoin.out, i)) {
-                    success = false;
-                    break;
-                }
-                newcoin.nHeight = 1;
-                view.AddCoin(psbtx.tx->vin[i].prevout, std::move(newcoin), true);
-            } else {
-                success = false;
-                break;
-            }
-        }
-
-        if (success) {
-            CTransaction ctx = CTransaction(mtx);
-            size_t size = GetVirtualTransactionSize(ctx, GetTransactionSigOpCost(ctx, view, STANDARD_SCRIPT_VERIFY_FLAGS));
-            result.pushKV("estimated_vsize", (int)size);
-            // Estimate fee rate
-            CFeeRate feerate(fee, size);
-            result.pushKV("estimated_feerate", ValueFromAmount(feerate.GetFeePerK()));
-        }
-        result.pushKV("fee", ValueFromAmount(fee));
-
-        if (only_missing_sigs) {
-            result.pushKV("next", "signer");
-        } else if (only_missing_final) {
-            result.pushKV("next", "finalizer");
-        } else if (all_final) {
-            result.pushKV("next", "extractor");
-        } else {
-            result.pushKV("next", "updater");
-        }
-    } else {
-        result.pushKV("next", "updater");
+    if (psbta.estimated_feerate != nullopt) {
+        result.pushKV("estimated_feerate", ValueFromAmount(psbta.estimated_feerate->GetFeePerK()));
     }
+    if (psbta.fee != nullopt) {
+        result.pushKV("fee", ValueFromAmount(*psbta.fee));
+    }
+    result.pushKV("next", PSBTRoleName(psbta.next));
+
     return result;
 }
 
