@@ -80,10 +80,14 @@ class TestNode():
         # For those callers that need more flexibility, they can just set the args property directly.
         # Note that common args are set in the config file (see initialize_datadir)
         self.extra_args = extra_args
+        # Configuration for logging is set as command-line args rather than in the bitcoin.conf file.
+        # This means that starting a bitcoind using the temp dir to debug a failed test won't
+        # spam debug.log.
         self.args = [
             self.binary,
             "-datadir=" + self.datadir,
             "-logtimemicros",
+            "-logthreadnames",
             "-debug",
             "-debugexclude=libevent",
             "-debugexclude=leveldb",
@@ -369,7 +373,7 @@ class TestNode():
                 stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL) == 0
 
         if not sys.platform.startswith('linux'):
-            self.log.warning("Can't profile with perf; only availabe on Linux platforms")
+            self.log.warning("Can't profile with perf; only available on Linux platforms")
             return None
 
         if not test_success('which perf'):

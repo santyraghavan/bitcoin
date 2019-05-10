@@ -14,7 +14,14 @@ from test_framework.blocktools import create_coinbase
 from test_framework.messages import CBlock, ToHex
 from test_framework.script import CScript, OP_RETURN, OP_NOP
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal, assert_greater_than, assert_raises_rpc_error, connect_nodes, disconnect_nodes, sync_blocks, wait_until
+from test_framework.util import (
+    assert_equal,
+    assert_greater_than,
+    assert_raises_rpc_error,
+    connect_nodes,
+    disconnect_nodes,
+    wait_until,
+)
 
 MIN_BLOCKS_TO_KEEP = 288
 
@@ -28,16 +35,17 @@ def mine_large_blocks(node, n):
     # followed by 950k of OP_NOP. This would be non-standard in a non-coinbase
     # transaction but is consensus valid.
 
+    # Set the nTime if this is the first time this function has been called.
+    # A static variable ensures that time is monotonicly increasing and is therefore
+    # different for each block created => blockhash is unique.
+    if "nTimes" not in mine_large_blocks.__dict__:
+        mine_large_blocks.nTime = 0
+
     # Get the block parameters for the first block
     big_script = CScript([OP_RETURN] + [OP_NOP] * 950000)
     best_block = node.getblock(node.getbestblockhash())
     height = int(best_block["height"]) + 1
-    try:
-        # Static variable ensures that time is monotonicly increasing and is therefore
-        # different for each block created => blockhash is unique.
-        mine_large_blocks.nTime = min(mine_large_blocks.nTime, int(best_block["time"])) + 1
-    except AttributeError:
-        mine_large_blocks.nTime = int(best_block["time"]) + 1
+    mine_large_blocks.nTime = max(mine_large_blocks.nTime, int(best_block["time"])) + 1
     previousblockhash = int(best_block["hash"], 16)
 
     for _ in range(n):
@@ -100,7 +108,7 @@ class PruneTest(BitcoinTestFramework):
         connect_nodes(self.nodes[0], 2)
         connect_nodes(self.nodes[0], 3)
         connect_nodes(self.nodes[0], 4)
-        sync_blocks(self.nodes[0:5])
+        self.sync_blocks(self.nodes[0:5])
 
     def setup_nodes(self):
         self.add_nodes(self.num_nodes, self.extra_args)
@@ -111,13 +119,13 @@ class PruneTest(BitcoinTestFramework):
     def create_big_chain(self):
         # Start by creating some coinbases we can spend later
         self.nodes[1].generate(200)
-        sync_blocks(self.nodes[0:2])
+        self.sync_blocks(self.nodes[0:2])
         self.nodes[0].generate(150)
 
         # Then mine enough full blocks to create more than 550MiB of data
         mine_large_blocks(self.nodes[0], 645)
 
-        sync_blocks(self.nodes[0:5])
+        self.sync_blocks(self.nodes[0:5])
 
     def test_height_min(self):
         assert os.path.isfile(os.path.join(self.prunedir, "blk00000.dat")), "blk00000.dat is missing, pruning too early"
@@ -153,7 +161,7 @@ class PruneTest(BitcoinTestFramework):
             # Create connections in the order so both nodes can see the reorg at the same time
             connect_nodes(self.nodes[0], 1)
             connect_nodes(self.nodes[0], 2)
-            sync_blocks(self.nodes[0:3])
+            self.sync_blocks(self.nodes[0:3])
 
         self.log.info("Usage can be over target because of high stale rate: %d" % calc_usage(self.prunedir))
 
@@ -190,7 +198,7 @@ class PruneTest(BitcoinTestFramework):
         self.log.info("Reconnect nodes")
         connect_nodes(self.nodes[0], 1)
         connect_nodes(self.nodes[1], 2)
-        sync_blocks(self.nodes[0:3], timeout=120)
+        self.sync_blocks(self.nodes[0:3], timeout=120)
 
         self.log.info("Verify height on node 2: %d" % self.nodes[2].getblockcount())
         self.log.info("Usage possibly still high because of stale blocks in block files: %d" % calc_usage(self.prunedir))
@@ -345,7 +353,7 @@ class PruneTest(BitcoinTestFramework):
         self.log.info("Syncing node 5 to test wallet")
         connect_nodes(self.nodes[0], 5)
         nds = [self.nodes[0], self.nodes[5]]
-        sync_blocks(nds, wait=5, timeout=300)
+        self.sync_blocks(nds, wait=5, timeout=300)
         self.stop_node(5)  # stop and start to trigger rescan
         self.start_node(5, extra_args=["-prune=550"])
         self.log.info("Success")

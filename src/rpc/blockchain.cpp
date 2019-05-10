@@ -7,13 +7,14 @@
 
 #include <amount.h>
 #include <base58.h>
+#include <blockfilter.h>
 #include <chain.h>
 #include <chainparams.h>
-#include <checkpoints.h>
 #include <coins.h>
 #include <consensus/validation.h>
 #include <core_io.h>
 #include <hash.h>
+#include <index/blockfilterindex.h>
 #include <index/txindex.h>
 #include <key_io.h>
 #include <policy/feerate.h>
@@ -29,6 +30,7 @@
 #include <txmempool.h>
 #include <util/strencodings.h>
 #include <util/system.h>
+#include <util/validation.h>
 #include <validation.h>
 #include <validationinterface.h>
 #include <versionbitsinfo.h>
@@ -91,6 +93,9 @@ static int ComputeNextBlockAndDepth(const CBlockIndex* tip, const CBlockIndex* b
 
 UniValue blockheaderToJSON(const CBlockIndex* tip, const CBlockIndex* blockindex)
 {
+    // Serialize passed information without accessing chain state of the active chain!
+    AssertLockNotHeld(cs_main); // For performance reasons
+
     UniValue result(UniValue::VOBJ);
     result.pushKV("hash", blockindex->GetBlockHash().GetHex());
     const CBlockIndex* pnext;
@@ -117,6 +122,9 @@ UniValue blockheaderToJSON(const CBlockIndex* tip, const CBlockIndex* blockindex
 
 UniValue blockToJSON(const CBlock& block, const CBlockIndex* tip, const CBlockIndex* blockindex, bool txDetails)
 {
+    // Serialize passed information without accessing chain state of the active chain!
+    AssertLockNotHeld(cs_main); // For performance reasons
+
     UniValue result(UniValue::VOBJ);
     result.pushKV("hash", blockindex->GetBlockHash().GetHex());
     const CBlockIndex* pnext;
@@ -174,7 +182,7 @@ static UniValue getblockcount(const JSONRPCRequest& request)
             }.ToString());
 
     LOCK(cs_main);
-    return chainActive.Height();
+    return ::ChainActive().Height();
 }
 
 static UniValue getbestblockhash(const JSONRPCRequest& request)
@@ -194,7 +202,7 @@ static UniValue getbestblockhash(const JSONRPCRequest& request)
             }.ToString());
 
     LOCK(cs_main);
-    return chainActive.Tip()->GetBlockHash().GetHex();
+    return ::ChainActive().Tip()->GetBlockHash().GetHex();
 }
 
 void RPCNotifyBlockChange(bool ibd, const CBlockIndex * pindex)
@@ -373,7 +381,7 @@ static UniValue getdifficulty(const JSONRPCRequest& request)
             }.ToString());
 
     LOCK(cs_main);
-    return GetDifficulty(chainActive.Tip());
+    return GetDifficulty(::ChainActive().Tip());
 }
 
 static std::string EntryDescriptionString()
@@ -724,10 +732,10 @@ static UniValue getblockhash(const JSONRPCRequest& request)
     LOCK(cs_main);
 
     int nHeight = request.params[0].get_int();
-    if (nHeight < 0 || nHeight > chainActive.Height())
+    if (nHeight < 0 || nHeight > ::ChainActive().Height())
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Block height out of range");
 
-    CBlockIndex* pblockindex = chainActive[nHeight];
+    CBlockIndex* pblockindex = ::ChainActive()[nHeight];
     return pblockindex->GetBlockHash().GetHex();
 }
 
@@ -783,7 +791,7 @@ static UniValue getblockheader(const JSONRPCRequest& request)
     {
         LOCK(cs_main);
         pblockindex = LookupBlockIndex(hash);
-        tip = chainActive.Tip();
+        tip = ::ChainActive().Tip();
     }
 
     if (!pblockindex) {
@@ -822,9 +830,7 @@ static CBlock GetBlockChecked(const CBlockIndex* pblockindex)
 
 static UniValue getblock(const JSONRPCRequest& request)
 {
-    if (request.fHelp || request.params.size() < 1 || request.params.size() > 2)
-        throw std::runtime_error(
-            RPCHelpMan{"getblock",
+    const RPCHelpMan help{"getblock",
                 "\nIf verbosity is 0, returns a string that is serialized, hex-encoded data for block 'hash'.\n"
                 "If verbosity is 1, returns an Object with information about block <hash>.\n"
                 "If verbosity is 2, returns an Object with information about block <hash> and information about each transaction. \n",
@@ -876,9 +882,11 @@ static UniValue getblock(const JSONRPCRequest& request)
                     HelpExampleCli("getblock", "\"00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09\"")
             + HelpExampleRpc("getblock", "\"00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09\"")
                 },
-            }.ToString());
+    };
 
-    LOCK(cs_main);
+    if (request.fHelp || !help.IsValidNumArgs(request.params.size())) {
+        throw std::runtime_error(help.ToString());
+    }
 
     uint256 hash(ParseHashV(request.params[0], "blockhash"));
 
@@ -890,12 +898,20 @@ static UniValue getblock(const JSONRPCRequest& request)
             verbosity = request.params[1].get_bool() ? 1 : 0;
     }
 
-    const CBlockIndex* pblockindex = LookupBlockIndex(hash);
-    if (!pblockindex) {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
-    }
+    CBlock block;
+    const CBlockIndex* pblockindex;
+    const CBlockIndex* tip;
+    {
+        LOCK(cs_main);
+        pblockindex = LookupBlockIndex(hash);
+        tip = ::ChainActive().Tip();
 
-    const CBlock block = GetBlockChecked(pblockindex);
+        if (!pblockindex) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
+        }
+
+        block = GetBlockChecked(pblockindex);
+    }
 
     if (verbosity <= 0)
     {
@@ -905,7 +921,7 @@ static UniValue getblock(const JSONRPCRequest& request)
         return strHex;
     }
 
-    return blockToJSON(block, chainActive.Tip(), pblockindex, verbosity >= 2);
+    return blockToJSON(block, tip, pblockindex, verbosity >= 2);
 }
 
 struct CCoinsStats
@@ -1010,7 +1026,7 @@ static UniValue pruneblockchain(const JSONRPCRequest& request)
     // too low to be a block time (corresponds to timestamp from Sep 2001).
     if (heightParam > 1000000000) {
         // Add a 2 hour buffer to include blocks which might have had old timestamps
-        CBlockIndex* pindex = chainActive.FindEarliestAtLeast(heightParam - TIMESTAMP_WINDOW);
+        CBlockIndex* pindex = ::ChainActive().FindEarliestAtLeast(heightParam - TIMESTAMP_WINDOW, 0);
         if (!pindex) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Could not find block with at least the specified timestamp.");
         }
@@ -1018,7 +1034,7 @@ static UniValue pruneblockchain(const JSONRPCRequest& request)
     }
 
     unsigned int height = (unsigned int) heightParam;
-    unsigned int chainHeight = (unsigned int) chainActive.Height();
+    unsigned int chainHeight = (unsigned int) ::ChainActive().Height();
     if (chainHeight < Params().PruneAfterHeight())
         throw JSONRPCError(RPC_MISC_ERROR, "Blockchain is too short for pruning.");
     else if (height > chainHeight)
@@ -1317,10 +1333,10 @@ UniValue getblockchaininfo(const JSONRPCRequest& request)
 
     LOCK(cs_main);
 
-    const CBlockIndex* tip = chainActive.Tip();
+    const CBlockIndex* tip = ::ChainActive().Tip();
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("chain",                 Params().NetworkIDString());
-    obj.pushKV("blocks",                (int)chainActive.Height());
+    obj.pushKV("blocks",                (int)::ChainActive().Height());
     obj.pushKV("headers",               pindexBestHeader ? pindexBestHeader->nHeight : -1);
     obj.pushKV("bestblockhash",         tip->GetBlockHash().GetHex());
     obj.pushKV("difficulty",            (double)GetDifficulty(tip));
@@ -1417,11 +1433,11 @@ static UniValue getchaintips(const JSONRPCRequest& request)
     LOCK(cs_main);
 
     /*
-     * Idea:  the set of chain tips is chainActive.tip, plus orphan blocks which do not have another orphan building off of them.
+     * Idea:  the set of chain tips is ::ChainActive().tip, plus orphan blocks which do not have another orphan building off of them.
      * Algorithm:
      *  - Make one pass through mapBlockIndex, picking out the orphan blocks, and also storing a set of the orphan block's pprev pointers.
      *  - Iterate through the orphan blocks. If the block isn't pointed to by another orphan, it is a chain tip.
-     *  - add chainActive.Tip()
+     *  - add ::ChainActive().Tip()
      */
     std::set<const CBlockIndex*, CompareBlocksByHeight> setTips;
     std::set<const CBlockIndex*> setOrphans;
@@ -1429,7 +1445,7 @@ static UniValue getchaintips(const JSONRPCRequest& request)
 
     for (const std::pair<const uint256, CBlockIndex*>& item : mapBlockIndex)
     {
-        if (!chainActive.Contains(item.second)) {
+        if (!::ChainActive().Contains(item.second)) {
             setOrphans.insert(item.second);
             setPrevs.insert(item.second->pprev);
         }
@@ -1443,7 +1459,7 @@ static UniValue getchaintips(const JSONRPCRequest& request)
     }
 
     // Always report the currently active tip.
-    setTips.insert(chainActive.Tip());
+    setTips.insert(::ChainActive().Tip());
 
     /* Construct the output array.  */
     UniValue res(UniValue::VARR);
@@ -1453,11 +1469,11 @@ static UniValue getchaintips(const JSONRPCRequest& request)
         obj.pushKV("height", block->nHeight);
         obj.pushKV("hash", block->phashBlock->GetHex());
 
-        const int branchLen = block->nHeight - chainActive.FindFork(block)->nHeight;
+        const int branchLen = block->nHeight - ::ChainActive().FindFork(block)->nHeight;
         obj.pushKV("branchlen", branchLen);
 
         std::string status;
-        if (chainActive.Contains(block)) {
+        if (::ChainActive().Contains(block)) {
             // This block is part of the currently active chain.
             status = "active";
         } else if (block->nStatus & BLOCK_FAILED_MASK) {
@@ -1486,7 +1502,10 @@ static UniValue getchaintips(const JSONRPCRequest& request)
 
 UniValue MempoolInfoToJSON(const CTxMemPool& pool)
 {
+    // Make sure this call is atomic in the pool.
+    LOCK(pool.cs);
     UniValue ret(UniValue::VOBJ);
+    ret.pushKV("loaded", pool.IsLoaded());
     ret.pushKV("size", (int64_t)pool.size());
     ret.pushKV("bytes", (int64_t)pool.GetTotalTxSize());
     ret.pushKV("usage", (int64_t)pool.DynamicMemoryUsage());
@@ -1507,6 +1526,7 @@ static UniValue getmempoolinfo(const JSONRPCRequest& request)
                 {},
                 RPCResult{
             "{\n"
+            "  \"loaded\": true|false         (boolean) True if the mempool is fully loaded\n"
             "  \"size\": xxxxx,               (numeric) Current tx count\n"
             "  \"bytes\": xxxxx,              (numeric) Sum of all virtual transaction sizes as defined in BIP 141. Differs from actual serialized size because witness data is discounted\n"
             "  \"usage\": xxxxx,              (numeric) Total memory usage for the mempool\n"
@@ -1674,7 +1694,7 @@ static UniValue getchaintxstats(const JSONRPCRequest& request)
 
     if (request.params[1].isNull()) {
         LOCK(cs_main);
-        pindex = chainActive.Tip();
+        pindex = ::ChainActive().Tip();
     } else {
         uint256 hash(ParseHashV(request.params[1], "blockhash"));
         LOCK(cs_main);
@@ -1682,7 +1702,7 @@ static UniValue getchaintxstats(const JSONRPCRequest& request)
         if (!pindex) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
         }
-        if (!chainActive.Contains(pindex)) {
+        if (!::ChainActive().Contains(pindex)) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Block is not in main chain");
         }
     }
@@ -1843,7 +1863,7 @@ static UniValue getblockstats(const JSONRPCRequest& request)
     CBlockIndex* pindex;
     if (request.params[0].isNum()) {
         const int height = request.params[0].get_int();
-        const int current_tip = chainActive.Height();
+        const int current_tip = ::ChainActive().Height();
         if (height < 0) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Target block height %d is negative", height));
         }
@@ -1851,14 +1871,14 @@ static UniValue getblockstats(const JSONRPCRequest& request)
             throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Target block height %d after current tip %d", height, current_tip));
         }
 
-        pindex = chainActive[height];
+        pindex = ::ChainActive()[height];
     } else {
         const uint256 hash(ParseHashV(request.params[0], "hash_or_height"));
         pindex = LookupBlockIndex(hash);
         if (!pindex) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
         }
-        if (!chainActive.Contains(pindex)) {
+        if (!::ChainActive().Contains(pindex)) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Block is not in chain %s", Params().NetworkIDString()));
         }
     }
@@ -2057,11 +2077,11 @@ static UniValue savemempool(const JSONRPCRequest& request)
             }.ToString());
     }
 
-    if (!g_is_mempool_loaded) {
+    if (!::mempool.IsLoaded()) {
         throw JSONRPCError(RPC_MISC_ERROR, "The mempool was not loaded yet");
     }
 
-    if (!DumpMempool()) {
+    if (!DumpMempool(::mempool)) {
         throw JSONRPCError(RPC_MISC_ERROR, "Unable to dump mempool to disk");
     }
 
@@ -2224,8 +2244,7 @@ UniValue scantxoutset(const JSONRPCRequest& request)
                 desc_str = desc_uni.get_str();
                 UniValue range_uni = find_value(scanobject, "range");
                 if (!range_uni.isNull()) {
-                    range = ParseRange(range_uni);
-                    if (range.first < 0 || (range.second >> 31) != 0 || range.second >= range.first + 1000000) throw JSONRPCError(RPC_INVALID_PARAMETER, "range out of range");
+                    range = ParseDescriptorRange(range_uni);
                 }
             } else {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Scan object needs to be either a string or an object");
@@ -2296,6 +2315,85 @@ UniValue scantxoutset(const JSONRPCRequest& request)
     return result;
 }
 
+static UniValue getblockfilter(const JSONRPCRequest& request)
+{
+    if (request.fHelp || request.params.size() < 1 || request.params.size() > 2) {
+        throw std::runtime_error(
+            RPCHelpMan{"getblockfilter",
+                "\nRetrieve a BIP 157 content filter for a particular block.\n",
+                {
+                    {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The hash of the block"},
+                    {"filtertype", RPCArg::Type::STR, /*default*/ "basic", "The type name of the filter"},
+                },
+                RPCResult{
+                    "{\n"
+                    "  \"filter\" : (string) the hex-encoded filter data\n"
+                    "  \"header\" : (string) the hex-encoded filter header\n"
+                    "}\n"
+                },
+                RPCExamples{
+                    HelpExampleCli("getblockfilter", "\"00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09\" \"basic\"")
+                }
+            }.ToString()
+        );
+    }
+
+    uint256 block_hash = ParseHashV(request.params[0], "blockhash");
+    std::string filtertype_name = "basic";
+    if (!request.params[1].isNull()) {
+        filtertype_name = request.params[1].get_str();
+    }
+
+    BlockFilterType filtertype;
+    if (!BlockFilterTypeByName(filtertype_name, filtertype)) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Unknown filtertype");
+    }
+
+    BlockFilterIndex* index = GetBlockFilterIndex(filtertype);
+    if (!index) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Index is not enabled for filtertype " + filtertype_name);
+    }
+
+    const CBlockIndex* block_index;
+    bool block_was_connected;
+    {
+        LOCK(cs_main);
+        block_index = LookupBlockIndex(block_hash);
+        if (!block_index) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
+        }
+        block_was_connected = block_index->IsValid(BLOCK_VALID_SCRIPTS);
+    }
+
+    bool index_ready = index->BlockUntilSyncedToCurrentChain();
+
+    BlockFilter filter;
+    uint256 filter_header;
+    if (!index->LookupFilter(block_index, filter) ||
+        !index->LookupFilterHeader(block_index, filter_header)) {
+        int err_code;
+        std::string errmsg = "Filter not found.";
+
+        if (!block_was_connected) {
+            err_code = RPC_INVALID_ADDRESS_OR_KEY;
+            errmsg += " Block was not connected to active chain.";
+        } else if (!index_ready) {
+            err_code = RPC_MISC_ERROR;
+            errmsg += " Block filters are still in the process of being indexed.";
+        } else {
+            err_code = RPC_INTERNAL_ERROR;
+            errmsg += " This error is unexpected and indicates index corruption.";
+        }
+
+        throw JSONRPCError(err_code, errmsg);
+    }
+
+    UniValue ret(UniValue::VOBJ);
+    ret.pushKV("filter", HexStr(filter.GetEncodedFilter()));
+    ret.pushKV("header", filter_header.GetHex());
+    return ret;
+}
+
 // clang-format off
 static const CRPCCommand commands[] =
 { //  category              name                      actor (function)         argNames
@@ -2323,6 +2421,7 @@ static const CRPCCommand commands[] =
 
     { "blockchain",         "preciousblock",          &preciousblock,          {"blockhash"} },
     { "blockchain",         "scantxoutset",           &scantxoutset,           {"action", "scanobjects"} },
+    { "blockchain",         "getblockfilter",         &getblockfilter,         {"blockhash", "filtertype"} },
 
     /* Not shown in help */
     { "hidden",             "invalidateblock",        &invalidateblock,        {"blockhash"} },

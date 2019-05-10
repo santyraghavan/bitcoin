@@ -81,8 +81,7 @@ public:
 #define ADD_SIGNALS_DECL_WRAPPER(signal_name, rtype, ...)                                  \
     rtype signal_name(__VA_ARGS__);                                                        \
     using signal_name##Sig = rtype(__VA_ARGS__);                                           \
-    boost::signals2::connection signal_name##_connect(std::function<signal_name##Sig> fn); \
-    void signal_name##_disconnect(std::function<signal_name##Sig> fn);
+    boost::signals2::connection signal_name##_connect(std::function<signal_name##Sig> fn);
 
     /** Show message box. */
     ADD_SIGNALS_DECL_WRAPPER(ThreadSafeMessageBox, bool, const std::string& message, const std::string& caption, unsigned int style);
@@ -128,10 +127,6 @@ void InitWarning(const std::string& str);
 
 /** Show error message **/
 bool InitError(const std::string& str);
-
-std::string AmountHighWarn(const std::string& optname);
-
-std::string AmountErrMsg(const char* const optname, const std::string& strValue);
 
 extern CClientUIInterface uiInterface;
 

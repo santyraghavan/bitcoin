@@ -13,6 +13,7 @@
 #include <policy/fees.h>
 #include <policy/policy.h>
 #include <policy/rbf.h>
+#include <policy/settings.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <protocol.h>
@@ -40,7 +41,7 @@ class LockImpl : public Chain::Lock
 {
     Optional<int> getHeight() override
     {
-        int height = ::chainActive.Height();
+        int height = ::ChainActive().Height();
         if (height >= 0) {
             return height;
         }
@@ -49,7 +50,7 @@ class LockImpl : public Chain::Lock
     Optional<int> getBlockHeight(const uint256& hash) override
     {
         CBlockIndex* block = LookupBlockIndex(hash);
-        if (block && ::chainActive.Contains(block)) {
+        if (block && ::ChainActive().Contains(block)) {
             return block->nHeight;
         }
         return nullopt;
@@ -62,54 +63,40 @@ class LockImpl : public Chain::Lock
     }
     uint256 getBlockHash(int height) override
     {
-        CBlockIndex* block = ::chainActive[height];
+        CBlockIndex* block = ::ChainActive()[height];
         assert(block != nullptr);
         return block->GetBlockHash();
     }
     int64_t getBlockTime(int height) override
     {
-        CBlockIndex* block = ::chainActive[height];
+        CBlockIndex* block = ::ChainActive()[height];
         assert(block != nullptr);
         return block->GetBlockTime();
     }
     int64_t getBlockMedianTimePast(int height) override
     {
-        CBlockIndex* block = ::chainActive[height];
+        CBlockIndex* block = ::ChainActive()[height];
         assert(block != nullptr);
         return block->GetMedianTimePast();
     }
     bool haveBlockOnDisk(int height) override
     {
-        CBlockIndex* block = ::chainActive[height];
+        CBlockIndex* block = ::ChainActive()[height];
         return block && ((block->nStatus & BLOCK_HAVE_DATA) != 0) && block->nTx > 0;
     }
-    Optional<int> findFirstBlockWithTime(int64_t time, uint256* hash) override
+    Optional<int> findFirstBlockWithTimeAndHeight(int64_t time, int height, uint256* hash) override
     {
-        CBlockIndex* block = ::chainActive.FindEarliestAtLeast(time);
+        CBlockIndex* block = ::ChainActive().FindEarliestAtLeast(time, height);
         if (block) {
             if (hash) *hash = block->GetBlockHash();
             return block->nHeight;
         }
         return nullopt;
     }
-    Optional<int> findFirstBlockWithTimeAndHeight(int64_t time, int height) override
-    {
-        // TODO: Could update CChain::FindEarliestAtLeast() to take a height
-        // parameter and use it with std::lower_bound() to make this
-        // implementation more efficient and allow combining
-        // findFirstBlockWithTime and findFirstBlockWithTimeAndHeight into one
-        // method.
-        for (CBlockIndex* block = ::chainActive[height]; block; block = ::chainActive.Next(block)) {
-            if (block->GetBlockTime() >= time) {
-                return block->nHeight;
-            }
-        }
-        return nullopt;
-    }
     Optional<int> findPruned(int start_height, Optional<int> stop_height) override
     {
         if (::fPruneMode) {
-            CBlockIndex* block = stop_height ? ::chainActive[*stop_height] : ::chainActive.Tip();
+            CBlockIndex* block = stop_height ? ::ChainActive()[*stop_height] : ::ChainActive().Tip();
             while (block && block->nHeight >= start_height) {
                 if ((block->nStatus & BLOCK_HAVE_DATA) == 0) {
                     return block->nHeight;
@@ -122,7 +109,7 @@ class LockImpl : public Chain::Lock
     Optional<int> findFork(const uint256& hash, Optional<int>* height) override
     {
         const CBlockIndex* block = LookupBlockIndex(hash);
-        const CBlockIndex* fork = block ? ::chainActive.FindFork(block) : nullptr;
+        const CBlockIndex* fork = block ? ::ChainActive().FindFork(block) : nullptr;
         if (height) {
             if (block) {
                 *height = block->nHeight;
@@ -135,17 +122,11 @@ class LockImpl : public Chain::Lock
         }
         return nullopt;
     }
-    bool isPotentialTip(const uint256& hash) override
-    {
-        if (::chainActive.Tip()->GetBlockHash() == hash) return true;
-        CBlockIndex* block = LookupBlockIndex(hash);
-        return block && block->GetAncestor(::chainActive.Height()) == ::chainActive.Tip();
-    }
-    CBlockLocator getTipLocator() override { return ::chainActive.GetLocator(); }
+    CBlockLocator getTipLocator() override { return ::ChainActive().GetLocator(); }
     Optional<int> findLocatorFork(const CBlockLocator& locator) override
     {
         LockAnnotation lock(::cs_main);
-        if (CBlockIndex* fork = FindForkInGlobalIndex(::chainActive, locator)) {
+        if (CBlockIndex* fork = FindForkInGlobalIndex(::ChainActive(), locator)) {
             return fork->nHeight;
         }
         return nullopt;
@@ -202,17 +183,11 @@ public:
     {
         m_notifications->BlockDisconnected(*block);
     }
-    void ChainStateFlushed(const CBlockLocator& locator) override { m_notifications->ChainStateFlushed(locator); }
-    void ResendWalletTransactions(int64_t best_block_time, CConnman*) override
+    void UpdatedBlockTip(const CBlockIndex* index, const CBlockIndex* fork_index, bool is_ibd) override
     {
-        // `cs_main` is always held when this method is called, so it is safe to
-        // call `assumeLocked`. This is awkward, and the `assumeLocked` method
-        // should be able to be removed entirely if `ResendWalletTransactions`
-        // is replaced by a wallet timer as suggested in
-        // https://github.com/bitcoin/bitcoin/issues/15619
-        auto locked_chain = m_chain.assumeLocked();
-        m_notifications->ResendWalletTransactions(*locked_chain, best_block_time);
+        m_notifications->UpdatedBlockTip();
     }
+    void ChainStateFlushed(const CBlockLocator& locator) override { m_notifications->ChainStateFlushed(locator); }
     Chain& m_chain;
     Chain::Notifications* m_notifications;
 };
@@ -344,9 +319,9 @@ public:
     CFeeRate relayMinFee() override { return ::minRelayTxFee; }
     CFeeRate relayIncrementalFee() override { return ::incrementalRelayFee; }
     CFeeRate relayDustFee() override { return ::dustRelayFee; }
-    CAmount maxTxFee() override { return ::maxTxFee; }
     bool getPruneMode() override { return ::fPruneMode; }
     bool p2pEnabled() override { return g_connman != nullptr; }
+    bool isReadyToBroadcast() override { return !::fImporting && !::fReindex && !IsInitialBlockDownload(); }
     bool isInitialBlockDownload() override { return IsInitialBlockDownload(); }
     bool shutdownRequested() override { return ShutdownRequested(); }
     int64_t getAdjustedTime() override { return GetAdjustedTime(); }
@@ -362,11 +337,26 @@ public:
     {
         return MakeUnique<NotificationsHandlerImpl>(*this, notifications);
     }
-    void waitForNotifications() override { SyncWithValidationInterfaceQueue(); }
+    void waitForNotificationsIfNewBlocksConnected(const uint256& old_tip) override
+    {
+        if (!old_tip.IsNull()) {
+            LOCK(::cs_main);
+            if (old_tip == ::ChainActive().Tip()->GetBlockHash()) return;
+            CBlockIndex* block = LookupBlockIndex(old_tip);
+            if (block && block->GetAncestor(::ChainActive().Height()) == ::ChainActive().Tip()) return;
+        }
+        SyncWithValidationInterfaceQueue();
+    }
     std::unique_ptr<Handler> handleRpc(const CRPCCommand& command) override
     {
         return MakeUnique<RpcHandlerImpl>(command);
     }
+    bool rpcEnableDeprecated(const std::string& method) override { return IsDeprecatedRPCEnabled(method); }
+    void rpcRunLater(const std::string& name, std::function<void()> fn, int64_t seconds) override
+    {
+        RPCRunLater(name, std::move(fn), seconds);
+    }
+    int rpcSerializationFlags() override { return RPCSerializationFlags(); }
     void requestMempoolTransactions(Notifications& notifications) override
     {
         LOCK2(::cs_main, ::mempool.cs);

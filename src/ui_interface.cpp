@@ -28,10 +28,6 @@ struct UISignals {
     boost::signals2::connection CClientUIInterface::signal_name##_connect(std::function<signal_name##Sig> fn) \
     {                                                                                                         \
         return g_ui_signals.signal_name.connect(fn);                                                          \
-    }                                                                                                         \
-    void CClientUIInterface::signal_name##_disconnect(std::function<signal_name##Sig> fn)                     \
-    {                                                                                                         \
-        return g_ui_signals.signal_name.disconnect(&fn);                                                      \
     }
 
 ADD_SIGNALS_IMPL_WRAPPER(ThreadSafeMessageBox);
@@ -68,14 +64,4 @@ bool InitError(const std::string& str)
 void InitWarning(const std::string& str)
 {
     uiInterface.ThreadSafeMessageBox(str, "", CClientUIInterface::MSG_WARNING);
-}
-
-std::string AmountHighWarn(const std::string& optname)
-{
-    return strprintf(_("%s is set very high!"), optname);
-}
-
-std::string AmountErrMsg(const char* const optname, const std::string& strValue)
-{
-    return strprintf(_("Invalid amount for -%s=<amount>: '%s'"), optname, strValue);
 }

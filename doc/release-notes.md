@@ -24,14 +24,9 @@ shut down (which might take a few minutes for older versions), then run the
 installer (on Windows) or just copy over `/Applications/Bitcoin-Qt` (on Mac)
 or `bitcoind`/`bitcoin-qt` (on Linux).
 
-The first time you run version 0.15.0, your chainstate database will be converted to a
-new format, which will take anywhere from a few minutes to half an hour,
-depending on the speed of your machine.
-
-Note that the block database format also changed in version 0.8.0 and there is no
-automatic upgrade code from before version 0.8 to version 0.15.0. Upgrading
-directly from 0.7.x and earlier without redownloading the blockchain is not supported.
-However, as usual, old wallet versions are still supported.
+Upgrading directly from a version of Bitcoin Core that has reached its EOL is
+possible, but might take some time if the datadir needs to be migrated.  Old
+wallet versions of Bitcoin Core are generally supported.
 
 Downgrading warning
 -------------------
@@ -66,6 +61,15 @@ platform.
 Notable changes
 ===============
 
+New RPCs
+--------
+
+- `getbalances` returns an object with all balances (`mine`,
+  `untrusted_pending` and `immature`). Please refer to the RPC help of
+  `getbalances` for details. The new RPC is intended to replace
+  `getunconfirmedbalance` and the balance fields in `getwalletinfo`, as well as
+  `getbalance`. The old calls may be removed in a future version.
+
 Updated RPCs
 ------------
 
@@ -85,8 +89,13 @@ Low-level Changes section below.
 Low-level changes
 =================
 
-Example item
+Configuration
 ------------
+
+* An error is issued where previously a warning was issued when a setting in
+  the config file was specified in the default section, but not overridden for
+  the selected network. This change takes only effect if the selected network
+  is not mainnet.
 
 Credits
 =======

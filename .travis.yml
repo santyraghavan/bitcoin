@@ -64,7 +64,7 @@ script:
   - export CONTINUE=1
   - if [ $SECONDS -gt 1200 ]; then export CONTINUE=0; fi  # Likely the depends build took very long
   - if [ $CONTINUE = "1" ]; then set -o errexit; source .travis/test_06_script_a.sh; else set +o errexit; echo "$CACHE_ERR_MSG"; false; fi
-  - if [ $SECONDS -gt 1800 ]; then export CONTINUE=0; fi  # Likely the build took very long
+  - if [ $SECONDS -gt 2000 ]; then export CONTINUE=0; fi  # Likely the build took very long; The tests take about 1000s, so we should abort if we have less than 50*60-1000=2000s left
   - if [ $CONTINUE = "1" ]; then set -o errexit; source .travis/test_06_script_b.sh; else set +o errexit; echo "$CACHE_ERR_MSG"; false; fi
 after_script:
   - echo $TRAVIS_COMMIT_RANGE
@@ -96,16 +96,6 @@ jobs:
         # -Wno-psabi is to disable ABI warnings: "note: parameter passing for argument of type ... changed in GCC 7.1"
         # This could be removed once the ABI change warning does not show up by default
         BITCOIN_CONFIG="--enable-glibc-back-compat --enable-reduce-exports CXXFLAGS=-Wno-psabi"
-
-    - stage: test
-      name: 'Win32  [GOAL: deploy]  [no gui or functional tests]'
-      env: >-
-        HOST=i686-w64-mingw32
-        DPKG_ADD_ARCH="i386"
-        PACKAGES="python3 nsis g++-mingw-w64-i686 wine-binfmt wine32"
-        RUN_FUNCTIONAL_TESTS=false
-        GOAL="deploy"
-        BITCOIN_CONFIG="--enable-reduce-exports --disable-gui-tests"
 
     - stage: test
       name: 'Win64  [GOAL: deploy]  [no gui or functional tests]'

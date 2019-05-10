@@ -62,10 +62,10 @@ src/qt/bitcoin-qt.includes
 *.pyc
 *.o
 *.o-*
-*.patch
 *.a
 *.pb.cc
 *.pb.h
+*.dat
 
 *.log
 *.trs
@@ -73,6 +73,10 @@ src/qt/bitcoin-qt.includes
 
 *.json.h
 *.raw.h
+
+# Only ignore unexpected patches
+*.patch
+!depends/patches/*.patch
 
 #libtool object files
 *.lo
@@ -120,3 +124,6 @@ contrib/devtools/split-debug.sh
 
 # Output from running db4 installation
 db4/
+
+# clang-check
+*.plist

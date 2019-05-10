@@ -29,6 +29,7 @@
 #include <wallet/feebumper.h>
 #include <wallet/fees.h>
 #include <wallet/rpcwallet.h>
+#include <wallet/load.h>
 #include <wallet/wallet.h>
 #include <wallet/walletutil.h>
 
@@ -268,8 +269,13 @@ public:
         CAmount& new_fee,
         CMutableTransaction& mtx) override
     {
-        return feebumper::CreateTransaction(m_wallet.get(), txid, coin_control, total_fee, errors, old_fee, new_fee, mtx) ==
-               feebumper::Result::OK;
+        if (total_fee > 0) {
+            return feebumper::CreateTotalBumpTransaction(m_wallet.get(), txid, coin_control, total_fee, errors, old_fee, new_fee, mtx) ==
+                feebumper::Result::OK;
+        } else {
+            return feebumper::CreateRateBumpTransaction(m_wallet.get(), txid, coin_control, errors, old_fee, new_fee, mtx) ==
+                feebumper::Result::OK;
+        }
     }
     bool signBumpTransaction(CMutableTransaction& mtx) override { return feebumper::SignTransaction(m_wallet.get(), mtx); }
     bool commitBumpTransaction(const uint256& txid,
@@ -463,6 +469,7 @@ public:
     bool IsWalletFlagSet(uint64_t flag) override { return m_wallet->IsWalletFlagSet(flag); }
     OutputType getDefaultAddressType() override { return m_wallet->m_default_address_type; }
     OutputType getDefaultChangeType() override { return m_wallet->m_default_change_type; }
+    CAmount getDefaultMaxTxFee() override { return m_wallet->m_default_max_tx_fee; }
     void remove() override
     {
         RemoveWallet(m_wallet);

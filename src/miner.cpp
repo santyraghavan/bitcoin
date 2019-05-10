@@ -23,6 +23,7 @@
 #include <timedata.h>
 #include <util/moneystr.h>
 #include <util/system.h>
+#include <util/validation.h>
 #include <validationinterface.h>
 
 #include <algorithm>
@@ -108,7 +109,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     pblocktemplate->vTxSigOpsCost.push_back(-1); // updated at end
 
     LOCK2(cs_main, mempool.cs);
-    CBlockIndex* pindexPrev = chainActive.Tip();
+    CBlockIndex* pindexPrev = ::ChainActive().Tip();
     assert(pindexPrev != nullptr);
     nHeight = pindexPrev->nHeight + 1;
 
