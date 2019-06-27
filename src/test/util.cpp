@@ -6,21 +6,16 @@
 
 #include <chainparams.h>
 #include <consensus/merkle.h>
-#include <consensus/validation.h>
 #include <key_io.h>
 #include <miner.h>
 #include <outputtype.h>
 #include <pow.h>
-#include <scheduler.h>
 #include <script/standard.h>
-#include <txdb.h>
 #include <validation.h>
 #include <validationinterface.h>
 #ifdef ENABLE_WALLET
 #include <wallet/wallet.h>
 #endif
-
-#include <boost/thread.hpp>
 
 const std::string ADDRESS_BCRT1_UNSPENDABLE = "bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq3xueyj";
 
@@ -84,6 +79,7 @@ std::shared_ptr<CBlock> PrepareBlock(const CScript& coinbase_scriptPubKey)
             .CreateNewBlock(coinbase_scriptPubKey)
             ->block);
 
+    LOCK(cs_main);
     block->nTime = ::ChainActive().Tip()->GetMedianTimePast() + 1;
     block->hashMerkleRoot = BlockMerkleRoot(*block);
 

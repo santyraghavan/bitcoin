@@ -51,7 +51,6 @@
 #include <util/moneystr.h>
 #include <util/validation.h>
 #include <validationinterface.h>
-#include <warnings.h>
 #include <walletinitinterface.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -74,7 +73,7 @@
 #include <zmq/zmqrpc.h>
 #endif
 
-bool fFeeEstimatesInitialized = false;
+static bool fFeeEstimatesInitialized = false;
 static const bool DEFAULT_PROXYRANDOMIZE = true;
 static const bool DEFAULT_REST_ENABLE = false;
 static const bool DEFAULT_STOPAFTERBLOCKIMPORT = false;
@@ -109,14 +108,13 @@ static fs::path GetPidFile()
 
 NODISCARD static bool CreatePidFile()
 {
-    FILE* file = fsbridge::fopen(GetPidFile(), "w");
+    fsbridge::ofstream file{GetPidFile()};
     if (file) {
 #ifdef WIN32
-        fprintf(file, "%d\n", GetCurrentProcessId());
+        tfm::format(file, "%d\n", GetCurrentProcessId());
 #else
-        fprintf(file, "%d\n", getpid());
+        tfm::format(file, "%d\n", getpid());
 #endif
-        fclose(file);
         return true;
     } else {
         return InitError(strprintf(_("Unable to create the PID file '%s': %s"), GetPidFile().string(), std::strerror(errno)));
@@ -259,7 +257,7 @@ void Shutdown(InitInterfaces& interfaces)
 
     // FlushStateToDisk generates a ChainStateFlushed callback, which we should avoid missing
     if (pcoinsTip != nullptr) {
-        FlushStateToDisk();
+        ::ChainstateActive().ForceFlushStateToDisk();
     }
 
     // After there are no more peers/RPC left to give us new data which may generate
@@ -275,7 +273,7 @@ void Shutdown(InitInterfaces& interfaces)
     {
         LOCK(cs_main);
         if (pcoinsTip != nullptr) {
-            FlushStateToDisk();
+            ::ChainstateActive().ForceFlushStateToDisk();
         }
         pcoinsTip.reset();
         pcoinscatcher.reset();
@@ -380,10 +378,10 @@ void SetupServerArgs()
     gArgs.AddArg("-version", "Print version and exit", false, OptionsCategory::OPTIONS);
     gArgs.AddArg("-alertnotify=<cmd>", "Execute command when a relevant alert is received or we see a really long fork (%s in cmd is replaced by message)", false, OptionsCategory::OPTIONS);
     gArgs.AddArg("-assumevalid=<hex>", strprintf("If this block is in the chain assume that it and its ancestors are valid and potentially skip their script verification (0 to verify all, default: %s, testnet: %s)", defaultChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnetChainParams->GetConsensus().defaultAssumeValid.GetHex()), false, OptionsCategory::OPTIONS);
-    gArgs.AddArg("-blocksdir=<dir>", "Specify blocks directory (default: <datadir>/blocks)", false, OptionsCategory::OPTIONS);
+    gArgs.AddArg("-blocksdir=<dir>", "Specify directory to hold blocks subdirectory for *.dat files (default: <datadir>)", false, OptionsCategory::OPTIONS);
     gArgs.AddArg("-blocknotify=<cmd>", "Execute command when the best block changes (%s in cmd is replaced by block hash)", false, OptionsCategory::OPTIONS);
     gArgs.AddArg("-blockreconstructionextratxn=<n>", strprintf("Extra transactions to keep in memory for compact block reconstructions (default: %u)", DEFAULT_BLOCK_RECONSTRUCTION_EXTRA_TXN), false, OptionsCategory::OPTIONS);
-    gArgs.AddArg("-blocksonly", strprintf("Whether to operate in a blocks only mode (default: %u)", DEFAULT_BLOCKSONLY), true, OptionsCategory::OPTIONS);
+    gArgs.AddArg("-blocksonly", strprintf("Whether to reject transactions from network peers. Transactions from the wallet or RPC are not affected. (default: %u)", DEFAULT_BLOCKSONLY), false, OptionsCategory::OPTIONS);
     gArgs.AddArg("-conf=<file>", strprintf("Specify configuration file. Relative paths will be prefixed by datadir location. (default: %s)", BITCOIN_CONF_FILENAME), false, OptionsCategory::OPTIONS);
     gArgs.AddArg("-datadir=<dir>", "Specify data directory", false, OptionsCategory::OPTIONS);
     gArgs.AddArg("-dbbatchsize", strprintf("Maximum database write batch size in bytes (default: %u)", nDefaultDbBatchSize), true, OptionsCategory::OPTIONS);
@@ -525,7 +523,6 @@ void SetupServerArgs()
     gArgs.AddArg("-bytespersigop", strprintf("Equivalent bytes per sigop in transactions for relay and mining (default: %u)", DEFAULT_BYTES_PER_SIGOP), false, OptionsCategory::NODE_RELAY);
     gArgs.AddArg("-datacarrier", strprintf("Relay and mine data carrier transactions (default: %u)", DEFAULT_ACCEPT_DATACARRIER), false, OptionsCategory::NODE_RELAY);
     gArgs.AddArg("-datacarriersize", strprintf("Maximum size of data in data carrier transactions we relay and mine (default: %u)", MAX_OP_RETURN_RELAY), false, OptionsCategory::NODE_RELAY);
-    gArgs.AddArg("-mempoolreplacement", strprintf("Enable transaction replacement in the memory pool (default: %u)", DEFAULT_ENABLE_REPLACEMENT), false, OptionsCategory::NODE_RELAY);
     gArgs.AddArg("-minrelaytxfee=<amt>", strprintf("Fees (in %s/kB) smaller than this are considered zero fee for relaying, mining and transaction creation (default: %s)",
         CURRENCY_UNIT, FormatMoney(DEFAULT_MIN_RELAY_TX_FEE)), false, OptionsCategory::NODE_RELAY);
     gArgs.AddArg("-whitelistforcerelay", strprintf("Force relay of transactions from whitelisted peers even if the transactions were already in the mempool or violate local relay policy (default: %d)", DEFAULT_WHITELISTFORCERELAY), false, OptionsCategory::NODE_RELAY);
@@ -855,12 +852,6 @@ void InitLogging()
 {
     LogInstance().m_print_to_file = !gArgs.IsArgNegated("-debuglogfile");
     LogInstance().m_file_path = AbsPathForConfigVal(gArgs.GetArg("-debuglogfile", DEFAULT_DEBUGLOGFILE));
-
-    // Add newlines to the logfile to distinguish this execution from the last
-    // one; called before console logging is set up, so this is only sent to
-    // debug.log.
-    LogPrintf("\n\n\n\n\n");
-
     LogInstance().m_print_to_console = gArgs.GetBoolArg("-printtoconsole", !gArgs.GetBoolArg("-daemon", false));
     LogInstance().m_log_timestamps = gArgs.GetBoolArg("-logtimestamps", DEFAULT_LOGTIMESTAMPS);
     LogInstance().m_log_time_micros = gArgs.GetBoolArg("-logtimemicros", DEFAULT_LOGTIMEMICROS);
@@ -1177,15 +1168,6 @@ bool AppInitParameterInteraction()
 
     nMaxTipAge = gArgs.GetArg("-maxtipage", DEFAULT_MAX_TIP_AGE);
 
-    fEnableReplacement = gArgs.GetBoolArg("-mempoolreplacement", DEFAULT_ENABLE_REPLACEMENT);
-    if ((!fEnableReplacement) && gArgs.IsArgSet("-mempoolreplacement")) {
-        // Minimal effort at forwards compatibility
-        std::string strReplacementModeList = gArgs.GetArg("-mempoolreplacement", "");  // default is impossible
-        std::vector<std::string> vstrReplacementModes;
-        boost::split(vstrReplacementModes, strReplacementModeList, boost::is_any_of(","));
-        fEnableReplacement = (std::find(vstrReplacementModes.begin(), vstrReplacementModes.end(), "fee") != vstrReplacementModes.end());
-    }
-
     return true;
 }
 
@@ -1249,10 +1231,10 @@ bool AppInitMain(InitInterfaces& interfaces)
             // and because this needs to happen before any other debug.log printing
             LogInstance().ShrinkDebugFile();
         }
-        if (!LogInstance().OpenDebugLog()) {
+    }
+    if (!LogInstance().StartLogging()) {
             return InitError(strprintf("Could not open debug log file %s",
                 LogInstance().m_file_path.string()));
-        }
     }
 
     if (!LogInstance().m_log_timestamps)
@@ -1426,7 +1408,7 @@ bool AppInitMain(InitInterfaces& interfaces)
     // see Step 2: parameter interactions for more information about these
     fListen = gArgs.GetBoolArg("-listen", DEFAULT_LISTEN);
     fDiscover = gArgs.GetBoolArg("-discover", true);
-    fRelayTxes = !gArgs.GetBoolArg("-blocksonly", DEFAULT_BLOCKSONLY);
+    g_relay_txes = !gArgs.GetBoolArg("-blocksonly", DEFAULT_BLOCKSONLY);
 
     for (const std::string& strAddr : gArgs.GetArgs("-externalip")) {
         CService addrLocal;
@@ -1522,6 +1504,7 @@ bool AppInitMain(InitInterfaces& interfaces)
                 // Note that it also sets fReindex based on the disk flag!
                 // From here on out fReindex and fReset mean something different!
                 if (!LoadBlockIndex(chainparams)) {
+                    if (ShutdownRequested()) break;
                     strLoadError = _("Error loading block database");
                     break;
                 }
@@ -1692,7 +1675,7 @@ bool AppInitMain(InitInterfaces& interfaces)
         nLocalServices = ServiceFlags(nLocalServices & ~NODE_NETWORK);
         if (!fReindex) {
             uiInterface.InitMessage(_("Pruning blockstore..."));
-            PruneAndFlush();
+            ::ChainstateActive().PruneAndFlush();
         }
     }
 

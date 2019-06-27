@@ -1,15 +1,11 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2018 The Bitcoin Core developers
+// Copyright (c) 2009-2019 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <wallet/db.h>
 
-#include <addrman.h>
-#include <hash.h>
-#include <protocol.h>
 #include <util/strencodings.h>
-#include <wallet/walletutil.h>
 
 #include <stdint.h>
 
@@ -607,7 +603,9 @@ void BerkeleyBatch::Flush()
     if (fReadOnly)
         nMinutes = 1;
 
-    env->dbenv->txn_checkpoint(nMinutes ? gArgs.GetArg("-dblogsize", DEFAULT_WALLET_DBLOGSIZE) * 1024 : 0, nMinutes, 0);
+    if (env) { // env is nullptr for dummy databases (i.e. in tests). Don't actually flush if env is nullptr so we don't segfault
+        env->dbenv->txn_checkpoint(nMinutes ? gArgs.GetArg("-dblogsize", DEFAULT_WALLET_DBLOGSIZE) * 1024 : 0, nMinutes, 0);
+    }
 }
 
 void BerkeleyDatabase::IncrementUpdateCounter()

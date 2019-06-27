@@ -14,17 +14,12 @@
 #include <key.h>
 #include <key_io.h>
 #include <keystore.h>
-#include <net.h>
 #include <policy/fees.h>
 #include <policy/policy.h>
-#include <policy/rbf.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <script/descriptor.h>
 #include <script/script.h>
-#include <shutdown.h>
-#include <timedata.h>
-#include <txmempool.h>
 #include <util/bip32.h>
 #include <util/error.h>
 #include <util/fees.h>
@@ -40,6 +35,14 @@
 #include <future>
 
 #include <boost/algorithm/string/replace.hpp>
+
+const std::map<uint64_t,std::string> WALLET_FLAG_CAVEATS{
+    {WALLET_FLAG_AVOID_REUSE,
+        "You need to rescan the blockchain in order to correctly mark used "
+        "destinations in the past. Until this is done, some destinations may "
+        "be considered unused, even if the opposite is the case."
+    },
+};
 
 static const size_t OUTPUT_GROUP_MAX_ENTRIES = 10;
 
@@ -320,7 +323,7 @@ bool CWallet::AddKeyPubKeyWithDB(WalletBatch& batch, const CKey& secret, const C
                                                  secret.GetPrivKey(),
                                                  mapKeyMetadata[pubkey.GetID()]);
     }
-    UnsetWalletFlag(WALLET_FLAG_BLANK_WALLET);
+    UnsetWalletFlagWithDB(batch, WALLET_FLAG_BLANK_WALLET);
     return true;
 }
 
@@ -362,12 +365,6 @@ void CWallet::LoadScriptMetadata(const CScriptID& script_id, const CKeyMetadata&
     m_script_metadata[script_id] = meta;
 }
 
-// Writes a keymetadata for a public key. overwrite specifies whether to overwrite an existing metadata for that key if there exists one.
-bool CWallet::WriteKeyMetadata(const CKeyMetadata& meta, const CPubKey& pubkey, const bool overwrite)
-{
-    return WalletBatch(*database).WriteKeyMetadata(meta, pubkey, overwrite);
-}
-
 void CWallet::UpgradeKeyMetadata()
 {
     AssertLockHeld(cs_wallet);
@@ -376,7 +373,6 @@ void CWallet::UpgradeKeyMetadata()
     }
 
     std::unique_ptr<WalletBatch> batch = MakeUnique<WalletBatch>(*database);
-    size_t cnt = 0;
     for (auto& meta_pair : mapKeyMetadata) {
         CKeyMetadata& meta = meta_pair.second;
         if (!meta.hd_seed_id.IsNull() && !meta.has_key_origin && meta.hdKeypath != "s") { // If the hdKeypath is "s", that's the seed and it doesn't have a key origin
@@ -399,10 +395,6 @@ void CWallet::UpgradeKeyMetadata()
             CPubKey pubkey;
             if (GetPubKey(meta_pair.first, pubkey)) {
                 batch->WriteKeyMetadata(meta, pubkey, true);
-                if (++cnt % 1000 == 0) {
-                    // avoid creating overlarge in-memory batches in case the wallet contains large amounts of keys
-                    batch.reset(new WalletBatch(*database));
-                }
             }
         }
     }
@@ -433,10 +425,16 @@ void CWallet::UpdateTimeFirstKey(int64_t nCreateTime)
 
 bool CWallet::AddCScript(const CScript& redeemScript)
 {
+    WalletBatch batch(*database);
+    return AddCScriptWithDB(batch, redeemScript);
+}
+
+bool CWallet::AddCScriptWithDB(WalletBatch& batch, const CScript& redeemScript)
+{
     if (!CCryptoKeyStore::AddCScript(redeemScript))
         return false;
-    if (WalletBatch(*database).WriteCScript(Hash160(redeemScript), redeemScript)) {
-        UnsetWalletFlag(WALLET_FLAG_BLANK_WALLET);
+    if (batch.WriteCScript(Hash160(redeemScript), redeemScript)) {
+        UnsetWalletFlagWithDB(batch, WALLET_FLAG_BLANK_WALLET);
         return true;
     }
     return false;
@@ -457,18 +455,30 @@ bool CWallet::LoadCScript(const CScript& redeemScript)
     return CCryptoKeyStore::AddCScript(redeemScript);
 }
 
-bool CWallet::AddWatchOnly(const CScript& dest)
+bool CWallet::AddWatchOnlyWithDB(WalletBatch &batch, const CScript& dest)
 {
     if (!CCryptoKeyStore::AddWatchOnly(dest))
         return false;
     const CKeyMetadata& meta = m_script_metadata[CScriptID(dest)];
     UpdateTimeFirstKey(meta.nCreateTime);
     NotifyWatchonlyChanged(true);
-    if (WalletBatch(*database).WriteWatchOnly(dest, meta)) {
-        UnsetWalletFlag(WALLET_FLAG_BLANK_WALLET);
+    if (batch.WriteWatchOnly(dest, meta)) {
+        UnsetWalletFlagWithDB(batch, WALLET_FLAG_BLANK_WALLET);
         return true;
     }
     return false;
+}
+
+bool CWallet::AddWatchOnlyWithDB(WalletBatch &batch, const CScript& dest, int64_t create_time)
+{
+    m_script_metadata[CScriptID(dest)].nCreateTime = create_time;
+    return AddWatchOnlyWithDB(batch, dest);
+}
+
+bool CWallet::AddWatchOnly(const CScript& dest)
+{
+    WalletBatch batch(*database);
+    return AddWatchOnlyWithDB(batch, dest);
 }
 
 bool CWallet::AddWatchOnly(const CScript& dest, int64_t nCreateTime)
@@ -930,6 +940,37 @@ bool CWallet::MarkReplaced(const uint256& originalHash, const uint256& newHash)
     return success;
 }
 
+void CWallet::SetUsedDestinationState(const uint256& hash, unsigned int n, bool used)
+{
+    const CWalletTx* srctx = GetWalletTx(hash);
+    if (!srctx) return;
+
+    CTxDestination dst;
+    if (ExtractDestination(srctx->tx->vout[n].scriptPubKey, dst)) {
+        if (::IsMine(*this, dst)) {
+            LOCK(cs_wallet);
+            if (used && !GetDestData(dst, "used", nullptr)) {
+                AddDestData(dst, "used", "p"); // p for "present", opposite of absent (null)
+            } else if (!used && GetDestData(dst, "used", nullptr)) {
+                EraseDestData(dst, "used");
+            }
+        }
+    }
+}
+
+bool CWallet::IsUsedDestination(const CTxDestination& dst) const
+{
+    LOCK(cs_wallet);
+    return ::IsMine(*this, dst) && GetDestData(dst, "used", nullptr);
+}
+
+bool CWallet::IsUsedDestination(const uint256& hash, unsigned int n) const
+{
+    CTxDestination dst;
+    const CWalletTx* srctx = GetWalletTx(hash);
+    return srctx && ExtractDestination(srctx->tx->vout[n].scriptPubKey, dst) && IsUsedDestination(dst);
+}
+
 bool CWallet::AddToWallet(const CWalletTx& wtxIn, bool fFlushOnClose)
 {
     LOCK(cs_wallet);
@@ -937,6 +978,14 @@ bool CWallet::AddToWallet(const CWalletTx& wtxIn, bool fFlushOnClose)
     WalletBatch batch(*database, "r+", fFlushOnClose);
 
     uint256 hash = wtxIn.GetHash();
+
+    if (IsWalletFlagSet(WALLET_FLAG_AVOID_REUSE)) {
+        // Mark used destinations
+        for (const CTxIn& txin : wtxIn.tx->vin) {
+            const COutPoint& op = txin.prevout;
+            SetUsedDestinationState(op.hash, op.n, true);
+        }
+    }
 
     // Inserts only if not already there, returns tx inserted or tx found
     std::pair<std::map<uint256, CWalletTx>::iterator, bool> ret = mapWallet.insert(std::make_pair(hash, wtxIn));
@@ -1543,13 +1592,19 @@ void CWallet::SetWalletFlag(uint64_t flags)
 
 void CWallet::UnsetWalletFlag(uint64_t flag)
 {
+    WalletBatch batch(*database);
+    UnsetWalletFlagWithDB(batch, flag);
+}
+
+void CWallet::UnsetWalletFlagWithDB(WalletBatch& batch, uint64_t flag)
+{
     LOCK(cs_wallet);
     m_wallet_flags &= ~flag;
-    if (!WalletBatch(*database).WriteWalletFlags(m_wallet_flags))
+    if (!batch.WriteWalletFlags(m_wallet_flags))
         throw std::runtime_error(std::string(__func__) + ": writing wallet flags failed");
 }
 
-bool CWallet::IsWalletFlagSet(uint64_t flag)
+bool CWallet::IsWalletFlagSet(uint64_t flag) const
 {
     return (m_wallet_flags & flag);
 }
@@ -1558,7 +1613,7 @@ bool CWallet::SetWalletFlags(uint64_t overwriteFlags, bool memonly)
 {
     LOCK(cs_wallet);
     m_wallet_flags = overwriteFlags;
-    if (((overwriteFlags & g_known_wallet_flags) >> 32) ^ (overwriteFlags >> 32)) {
+    if (((overwriteFlags & KNOWN_WALLET_FLAGS) >> 32) ^ (overwriteFlags >> 32)) {
         // contains unknown non-tolerable wallet flags
         return false;
     }
@@ -1602,6 +1657,80 @@ bool CWallet::DummySignTx(CMutableTransaction &txNew, const std::vector<CTxOut> 
         }
 
         nIn++;
+    }
+    return true;
+}
+
+bool CWallet::ImportScripts(const std::set<CScript> scripts)
+{
+    WalletBatch batch(*database);
+    for (const auto& entry : scripts) {
+        if (!HaveCScript(CScriptID(entry)) && !AddCScriptWithDB(batch, entry)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CWallet::ImportPrivKeys(const std::map<CKeyID, CKey>& privkey_map, const int64_t timestamp)
+{
+    WalletBatch batch(*database);
+    for (const auto& entry : privkey_map) {
+        const CKey& key = entry.second;
+        CPubKey pubkey = key.GetPubKey();
+        const CKeyID& id = entry.first;
+        assert(key.VerifyPubKey(pubkey));
+        mapKeyMetadata[id].nCreateTime = timestamp;
+        // If the private key is not present in the wallet, insert it.
+        if (!HaveKey(id) && !AddKeyPubKeyWithDB(batch, key, pubkey)) {
+            return false;
+        }
+        UpdateTimeFirstKey(timestamp);
+    }
+    return true;
+}
+
+bool CWallet::ImportPubKeys(const std::vector<CKeyID>& ordered_pubkeys, const std::map<CKeyID, CPubKey>& pubkey_map, const std::map<CKeyID, std::pair<CPubKey, KeyOriginInfo>>& key_origins, const bool add_keypool, const bool internal, const int64_t timestamp)
+{
+    WalletBatch batch(*database);
+    for (const auto& entry : key_origins) {
+        AddKeyOriginWithDB(batch, entry.second.first, entry.second.second);
+    }
+    for (const CKeyID& id : ordered_pubkeys) {
+        auto entry = pubkey_map.find(id);
+        if (entry == pubkey_map.end()) {
+            continue;
+        }
+        const CPubKey& pubkey = entry->second;
+        CPubKey temp;
+        if (!GetPubKey(id, temp) && !AddWatchOnlyWithDB(batch, GetScriptForRawPubKey(pubkey), timestamp)) {
+            return false;
+        }
+        mapKeyMetadata[id].nCreateTime = timestamp;
+
+        // Add to keypool only works with pubkeys
+        if (add_keypool) {
+            AddKeypoolPubkeyWithDB(pubkey, internal, batch);
+            NotifyCanGetAddressesChanged();
+        }
+    }
+    return true;
+}
+
+bool CWallet::ImportScriptPubKeys(const std::string& label, const std::set<CScript>& script_pub_keys, const bool have_solving_data, const bool internal, const int64_t timestamp)
+{
+    WalletBatch batch(*database);
+    for (const CScript& script : script_pub_keys) {
+        if (!have_solving_data || !::IsMine(*this, script)) { // Always call AddWatchOnly for non-solvable watch-only, so that watch timestamp gets updated
+            if (!AddWatchOnlyWithDB(batch, script, timestamp)) {
+                return false;
+            }
+        }
+        CTxDestination dest;
+        ExtractDestination(script, dest);
+        if (!internal && IsValidDestination(dest)) {
+            SetAddressBookWithDB(batch, dest, label, "receive");
+        }
     }
     return true;
 }
@@ -1977,7 +2106,7 @@ CAmount CWalletTx::GetAvailableCredit(interfaces::Chain::Lock& locked_chain, boo
         return 0;
 
     // Avoid caching ismine for NO or ALL cases (could remove this check and simplify in the future).
-    bool allow_cache = filter == ISMINE_SPENDABLE || filter == ISMINE_WATCH_ONLY;
+    bool allow_cache = (filter & ISMINE_ALL) && (filter & ISMINE_ALL) != ISMINE_ALL;
 
     // Must wait until coinbase is safely deep enough in the chain before valuing it
     if (IsImmatureCoinBase(locked_chain))
@@ -1987,12 +2116,12 @@ CAmount CWalletTx::GetAvailableCredit(interfaces::Chain::Lock& locked_chain, boo
         return m_amounts[AVAILABLE_CREDIT].m_value[filter];
     }
 
+    bool allow_used_addresses = (filter & ISMINE_USED) || !pwallet->IsWalletFlagSet(WALLET_FLAG_AVOID_REUSE);
     CAmount nCredit = 0;
     uint256 hashTx = GetHash();
     for (unsigned int i = 0; i < tx->vout.size(); i++)
     {
-        if (!pwallet->IsSpent(locked_chain, hashTx, i))
-        {
+        if (!pwallet->IsSpent(locked_chain, hashTx, i) && (allow_used_addresses || !pwallet->IsUsedDestination(hashTx, i))) {
             const CTxOut &txout = tx->vout[i];
             nCredit += pwallet->GetCredit(txout, filter);
             if (!MoneyRange(nCredit))
@@ -2134,9 +2263,10 @@ void MaybeResendWalletTxs()
  */
 
 
-CWallet::Balance CWallet::GetBalance(const int min_depth) const
+CWallet::Balance CWallet::GetBalance(const int min_depth, bool avoid_reuse) const
 {
     Balance ret;
+    isminefilter reuse_filter = avoid_reuse ? ISMINE_NO : ISMINE_USED;
     {
         auto locked_chain = chain().lock();
         LOCK(cs_wallet);
@@ -2145,8 +2275,8 @@ CWallet::Balance CWallet::GetBalance(const int min_depth) const
             const CWalletTx& wtx = entry.second;
             const bool is_trusted{wtx.IsTrusted(*locked_chain)};
             const int tx_depth{wtx.GetDepthInMainChain(*locked_chain)};
-            const CAmount tx_credit_mine{wtx.GetAvailableCredit(*locked_chain, /* fUseCache */ true, ISMINE_SPENDABLE)};
-            const CAmount tx_credit_watchonly{wtx.GetAvailableCredit(*locked_chain, /* fUseCache */ true, ISMINE_WATCH_ONLY)};
+            const CAmount tx_credit_mine{wtx.GetAvailableCredit(*locked_chain, /* fUseCache */ true, ISMINE_SPENDABLE | reuse_filter)};
+            const CAmount tx_credit_watchonly{wtx.GetAvailableCredit(*locked_chain, /* fUseCache */ true, ISMINE_WATCH_ONLY | reuse_filter)};
             if (is_trusted && tx_depth >= min_depth) {
                 ret.m_mine_trusted += tx_credit_mine;
                 ret.m_watchonly_trusted += tx_credit_watchonly;
@@ -2184,6 +2314,9 @@ void CWallet::AvailableCoins(interfaces::Chain::Lock& locked_chain, std::vector<
 
     vCoins.clear();
     CAmount nTotal = 0;
+    // Either the WALLET_FLAG_AVOID_REUSE flag is not set (in which case we always allow), or we default to avoiding, and only in the case where
+    // a coin control object is provided, and has the avoid address reuse flag set to false, do we allow already used addresses
+    bool allow_used_addresses = !IsWalletFlagSet(WALLET_FLAG_AVOID_REUSE) || (coinControl && !coinControl->m_avoid_address_reuse);
 
     for (const auto& entry : mapWallet)
     {
@@ -2262,6 +2395,10 @@ void CWallet::AvailableCoins(interfaces::Chain::Lock& locked_chain, std::vector<
             isminetype mine = IsMine(wtx.tx->vout[i]);
 
             if (mine == ISMINE_NO) {
+                continue;
+            }
+
+            if (!allow_used_addresses && IsUsedDestination(wtxid, i)) {
                 continue;
             }
 
@@ -3149,8 +3286,7 @@ DBErrors CWallet::ZapWalletTx(std::vector<CWalletTx>& vWtx)
     return DBErrors::LOAD_OK;
 }
 
-
-bool CWallet::SetAddressBook(const CTxDestination& address, const std::string& strName, const std::string& strPurpose)
+bool CWallet::SetAddressBookWithDB(WalletBatch& batch, const CTxDestination& address, const std::string& strName, const std::string& strPurpose)
 {
     bool fUpdated = false;
     {
@@ -3163,9 +3299,15 @@ bool CWallet::SetAddressBook(const CTxDestination& address, const std::string& s
     }
     NotifyAddressBookChanged(this, address, strName, ::IsMine(*this, address) != ISMINE_NO,
                              strPurpose, (fUpdated ? CT_UPDATED : CT_NEW) );
-    if (!strPurpose.empty() && !WalletBatch(*database).WritePurpose(EncodeDestination(address), strPurpose))
+    if (!strPurpose.empty() && !batch.WritePurpose(EncodeDestination(address), strPurpose))
         return false;
-    return WalletBatch(*database).WriteName(EncodeDestination(address), strName);
+    return batch.WriteName(EncodeDestination(address), strName);
+}
+
+bool CWallet::SetAddressBook(const CTxDestination& address, const std::string& strName, const std::string& strPurpose)
+{
+    WalletBatch batch(*database);
+    return SetAddressBookWithDB(batch, address, strName, strPurpose);
 }
 
 bool CWallet::DelAddressBook(const CTxDestination& address)
@@ -3313,13 +3455,6 @@ bool CWallet::TopUpKeyPool(unsigned int kpSize)
     }
     NotifyCanGetAddressesChanged();
     return true;
-}
-
-void CWallet::AddKeypoolPubkey(const CPubKey& pubkey, const bool internal)
-{
-    WalletBatch batch(*database);
-    AddKeypoolPubkeyWithDB(pubkey, internal, batch);
-    NotifyCanGetAddressesChanged();
 }
 
 void CWallet::AddKeypoolPubkeyWithDB(const CPubKey& pubkey, const bool internal, WalletBatch& batch)
@@ -4057,16 +4192,12 @@ std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(interfaces::Chain& chain,
         // ensure this wallet.dat can only be opened by clients supporting HD with chain split and expects no default key
         walletInstance->SetMinVersion(FEATURE_LATEST);
 
-        if ((wallet_creation_flags & WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
-            //selective allow to set flags
-            walletInstance->SetWalletFlag(WALLET_FLAG_DISABLE_PRIVATE_KEYS);
-        } else if (wallet_creation_flags & WALLET_FLAG_BLANK_WALLET) {
-            walletInstance->SetWalletFlag(WALLET_FLAG_BLANK_WALLET);
-        } else {
+        walletInstance->SetWalletFlags(wallet_creation_flags, false);
+        if (!(wallet_creation_flags & (WALLET_FLAG_DISABLE_PRIVATE_KEYS | WALLET_FLAG_BLANK_WALLET))) {
             // generate a new seed
             CPubKey seed = walletInstance->GenerateNewSeed();
             walletInstance->SetHDSeed(seed);
-        } // Otherwise, do not generate a new seed
+        }
 
         // Top up the keypool
         if (walletInstance->CanGenerateKeys() && !walletInstance->TopUpKeyPool()) {
@@ -4074,7 +4205,7 @@ std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(interfaces::Chain& chain,
             return nullptr;
         }
 
-        auto locked_chain = chain.assumeLocked();  // Temporary. Removed in upcoming lock cleanup
+        auto locked_chain = chain.lock();
         walletInstance->ChainStateFlushed(locked_chain->getTipLocator());
     } else if (wallet_creation_flags & WALLET_FLAG_DISABLE_PRIVATE_KEYS) {
         // Make it impossible to disable private keys after creation
@@ -4209,10 +4340,13 @@ std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(interfaces::Chain& chain,
 
     if (tip_height && *tip_height != rescan_height)
     {
-        //We can't rescan beyond non-pruned blocks, stop and throw an error
-        //this might happen if a user uses an old wallet within a pruned node
-        // or if he ran -disablewallet for a longer time, then decided to re-enable
-        if (chain.getPruneMode()) {
+        // We can't rescan beyond non-pruned blocks, stop and throw an error.
+        // This might happen if a user uses an old wallet within a pruned node
+        // or if they ran -disablewallet for a longer time, then decided to re-enable
+        if (chain.havePruned()) {
+            // Exit early and print an error.
+            // If a block is pruned after this check, we will load the wallet,
+            // but fail the rescan with a generic error.
             int block_height = *tip_height;
             while (block_height > 0 && locked_chain->haveBlockOnDisk(block_height - 1) && rescan_height != block_height) {
                 --block_height;
@@ -4440,12 +4574,12 @@ bool CWallet::GetKeyOrigin(const CKeyID& keyID, KeyOriginInfo& info) const
     return true;
 }
 
-bool CWallet::AddKeyOrigin(const CPubKey& pubkey, const KeyOriginInfo& info)
+bool CWallet::AddKeyOriginWithDB(WalletBatch& batch, const CPubKey& pubkey, const KeyOriginInfo& info)
 {
     LOCK(cs_wallet);
     std::copy(info.fingerprint, info.fingerprint + 4, mapKeyMetadata[pubkey.GetID()].key_origin.fingerprint);
     mapKeyMetadata[pubkey.GetID()].key_origin.path = info.path;
     mapKeyMetadata[pubkey.GetID()].has_key_origin = true;
     mapKeyMetadata[pubkey.GetID()].hdKeypath = WriteHDKeypath(info.path);
-    return WriteKeyMetadata(mapKeyMetadata[pubkey.GetID()], pubkey, true);
+    return batch.WriteKeyMetadata(mapKeyMetadata[pubkey.GetID()], pubkey, true);
 }

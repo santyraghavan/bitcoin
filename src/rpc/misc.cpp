@@ -3,25 +3,17 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <chain.h>
-#include <clientversion.h>
-#include <core_io.h>
 #include <crypto/ripemd160.h>
 #include <key_io.h>
-#include <validation.h>
 #include <httpserver.h>
-#include <net.h>
-#include <netbase.h>
 #include <outputtype.h>
 #include <rpc/blockchain.h>
 #include <rpc/server.h>
 #include <rpc/util.h>
 #include <script/descriptor.h>
-#include <timedata.h>
 #include <util/system.h>
 #include <util/strencodings.h>
 #include <util/validation.h>
-#include <warnings.h>
 
 #include <stdint.h>
 #include <tuple>
@@ -130,9 +122,9 @@ static UniValue createmultisig(const JSONRPCRequest& request)
     }
 
     // Construct using pay-to-script-hash:
-    const CScript inner = CreateMultisigRedeemscript(required, pubkeys);
     CBasicKeyStore keystore;
-    const CTxDestination dest = AddAndGetDestinationForScript(keystore, inner, output_type);
+    CScript inner;
+    const CTxDestination dest = AddAndGetMultisigDestination(required, pubkeys, output_type, keystore, inner);
 
     UniValue result(UniValue::VOBJ);
     result.pushKV("address", EncodeDestination(dest));
@@ -204,7 +196,7 @@ UniValue deriveaddresses(const JSONRPCRequest& request)
             },
             RPCExamples{
                 "First three native segwit receive addresses\n" +
-                HelpExampleCli("deriveaddresses", "\"wpkh([d34db33f/84h/0h/0h]xpub6DJ2dNUysrn5Vt36jH2KLBT2i1auw1tTSSomg8PhqNiUtx8QX2SvC9nrHu81fT41fvDUnhMjEzQgXnQjKEu3oaqMSzhSrHMxyyoEAmUHQbY/0/*)#trd0mf0l\" \"[0,2]\"")
+                HelpExampleCli("deriveaddresses", "\"wpkh([d34db33f/84h/0h/0h]xpub6DJ2dNUysrn5Vt36jH2KLBT2i1auw1tTSSomg8PhqNiUtx8QX2SvC9nrHu81fT41fvDUnhMjEzQgXnQjKEu3oaqMSzhSrHMxyyoEAmUHQbY/0/*)#cjjspncu\" \"[0,2]\"")
             }}.ToString()
         );
     }

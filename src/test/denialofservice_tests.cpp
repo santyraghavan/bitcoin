@@ -9,10 +9,11 @@
 #include <keystore.h>
 #include <net.h>
 #include <net_processing.h>
-#include <pow.h>
 #include <script/sign.h>
 #include <serialize.h>
+#include <util/memory.h>
 #include <util/system.h>
+#include <util/time.h>
 #include <validation.h>
 
 #include <test/setup_common.h>

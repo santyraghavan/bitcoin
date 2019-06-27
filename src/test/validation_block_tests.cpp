@@ -11,8 +11,11 @@
 #include <pow.h>
 #include <random.h>
 #include <test/setup_common.h>
+#include <util/time.h>
 #include <validation.h>
 #include <validationinterface.h>
+
+#include <thread>
 
 struct RegtestingSetup : public TestingSetup {
     RegtestingSetup() : TestingSetup(CBaseChainParams::REGTEST) {}
@@ -181,6 +184,7 @@ BOOST_AUTO_TEST_CASE(processnewblock_signals_ordering)
 
     UnregisterValidationInterface(&sub);
 
+    LOCK(cs_main);
     BOOST_CHECK_EQUAL(sub.m_expected_tip, ::ChainActive().Tip()->GetBlockHash());
 }
 

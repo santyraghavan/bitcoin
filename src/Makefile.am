@@ -181,7 +181,6 @@ BITCOIN_CORE_H = \
   rpc/util.h \
   scheduler.h \
   script/descriptor.h \
-  script/ismine.h \
   script/sigcache.h \
   script/sign.h \
   script/standard.h \
@@ -223,6 +222,7 @@ BITCOIN_CORE_H = \
   wallet/db.h \
   wallet/feebumper.h \
   wallet/fees.h \
+  wallet/ismine.h \
   wallet/load.h \
   wallet/psbtwallet.h \
   wallet/rpcwallet.h \
@@ -328,6 +328,7 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/db.cpp \
   wallet/feebumper.cpp \
   wallet/fees.cpp \
+  wallet/ismine.cpp \
   wallet/load.cpp \
   wallet/psbtwallet.cpp \
   wallet/rpcdump.cpp \
@@ -353,6 +354,8 @@ crypto_libbitcoin_crypto_base_a_SOURCES = \
   crypto/chacha20.h \
   crypto/chacha20.cpp \
   crypto/common.h \
+  crypto/hkdf_sha256_32.cpp \
+  crypto/hkdf_sha256_32.h \
   crypto/hmac_sha256.cpp \
   crypto/hmac_sha256.h \
   crypto/hmac_sha512.cpp \
@@ -456,7 +459,6 @@ libbitcoin_common_a_SOURCES = \
   rpc/util.cpp \
   scheduler.cpp \
   script/descriptor.cpp \
-  script/ismine.cpp \
   script/sign.cpp \
   script/standard.cpp \
   versionbitsinfo.cpp \
