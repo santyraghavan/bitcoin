@@ -1050,7 +1050,7 @@ bool CWallet::AddToWallet(const CWalletTx& wtxIn, bool fFlushOnClose)
     // Notify UI of new or updated transaction
     NotifyTransactionChanged(this, hash, fInsertedNew ? CT_NEW : CT_UPDATED);
 
-#if defined(HAVE_SYSTEM)
+#if HAVE_SYSTEM
     // notify an external script when a wallet transaction comes in or is updated
     std::string strCmd = gArgs.GetArg("-walletnotify", "");
 
@@ -4119,12 +4119,12 @@ std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(interfaces::Chain& chain,
                 walletFile));
         }
         else if (nLoadWalletRet == DBErrors::TOO_NEW) {
-            chain.initError(strprintf(_("Error loading %s: Wallet requires newer version of %s"), walletFile, _(PACKAGE_NAME)));
+            chain.initError(strprintf(_("Error loading %s: Wallet requires newer version of %s"), walletFile, PACKAGE_NAME));
             return nullptr;
         }
         else if (nLoadWalletRet == DBErrors::NEED_REWRITE)
         {
-            chain.initError(strprintf(_("Wallet needed to be rewritten: restart %s to complete"), _(PACKAGE_NAME)));
+            chain.initError(strprintf(_("Wallet needed to be rewritten: restart %s to complete"), PACKAGE_NAME));
             return nullptr;
         }
         else {
