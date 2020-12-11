@@ -7,8 +7,8 @@
 #include <boost/test/unit_test.hpp>
 
 #include <fs.h>
-#include <test/setup_common.h>
-#include <wallet/db.h>
+#include <test/util/setup_common.h>
+#include <wallet/bdb.h>
 
 
 BOOST_FIXTURE_TEST_SUITE(db_tests, BasicTestingSetup)
